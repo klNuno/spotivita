@@ -3,8 +3,20 @@
 #include <psp2/net/netctl.h>
 #include <psp2/sysmodule.h>
 #include <psp2/io/stat.h>
+#include <psp2/io/fcntl.h>
+#include <cstring>
 #include <Logger.h>
 #include "Config.h"
+
+void dbg_mark(const char *s) {
+    SceUID fd = sceIoOpen("ux0:data/cspot/stage.txt",
+                          SCE_O_WRONLY | SCE_O_CREAT | SCE_O_APPEND, 0666);
+    if (fd >= 0) {
+        sceIoWrite(fd, s, strlen(s));
+        sceIoWrite(fd, "\n", 1);
+        sceIoClose(fd);
+    }
+}
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "image/stb_image.h"

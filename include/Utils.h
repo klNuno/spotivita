@@ -40,6 +40,10 @@ bool LoadTextureFromMemory(const uint8_t* buffer, uint32_t length,
 int is_dir(const char *path);
 bool init_network();
 void term_network();
+// Synchronous boot-stage marker: appends a line to ux0:data/cspot/stage.txt with
+// sceIo (open/write/close) so the trail survives a hang/GPU-wedge, unlike the
+// buffered text logger. Used to pin down where startup blocks on-device.
+void dbg_mark(const char *s);
 int download(const char *url, uint8_t **return_buffer, const char *method = "GET",
                         std::string post_data = "", Headers headers = {});
 bool cache_cover_art(std::string url, uint8_t *buffer, uint32_t length);

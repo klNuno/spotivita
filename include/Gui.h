@@ -15,7 +15,12 @@ class GUI {
     void init();
     void start();
     std::atomic<bool> isRunning = true;
-    std::atomic<bool> paused = true;
+    // A Vita app is already foreground-active at cold launch and gets no initial
+    // ON_ACTIVATE event, so paused MUST start false. Starting true deadlocked the
+    // render loop before its first vglSwapBuffers, holding the GPU and wedging the
+    // whole system (other apps crash, shutdown hangs). The watchdog flips this on
+    // real background/foreground transitions afterwards.
+    std::atomic<bool> paused = false;
     ImFont *font;
     ImFont *playback_icon_font;
     ImFont *icon_font;

@@ -10,11 +10,15 @@
 #ifdef VITA
 #include <psp2/kernel/threadmgr.h>
 #include <cstring>
+#include <cstdio>
 #include <vector>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+// Synchronous on-device boot/stage marker, implemented app-side (src/Utils.cpp).
+// Declared here so the mDNS responder can leave a trail that survives a hang.
+void dbg_mark(const char *s);
 #endif
 
 // provide weak deviceId (see ConstantParameters.h)
@@ -116,25 +120,50 @@ bool get_local_ip(uint8_t out[4]) {
 }
 
 void mdns_thread(uint16_t port, std::string instanceLabel) {
+    dbg_mark("M1-mdns-enter");
     uint8_t ip[4];
     // Wait for the network to come up.
     while (!get_local_ip(ip)) {
         sceKernelDelayThread(1000000);
     }
+    dbg_mark("M2-got-ip");
 
     const std::string host = "cspot-vita.local";
 
     int s = socket(AF_INET, SOCK_DGRAM, 0);
     if (s < 0) {
         CSPOT_LOG(error, "mdns: socket() failed");
+        dbg_mark("M-socket-fail");
         return;
     }
 
-    // Send-only: we only need to ANNOUNCE, not answer queries. Deliberately no
-    // bind / group join / select / recv -- on vitasdk a select that returns
-    // immediately turned the old loop into a sendto flood that froze the device.
+    int reuse = 1;
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof reuse);
+
+    // Bind to the mDNS port so we can RECEIVE the phone's service queries.
+    // Spotify's app browses _spotify-connect._tcp and expects an answer; a
+    // send-only gratuitous announcement is usually not enough to get listed.
+    struct sockaddr_in baddr; memset(&baddr, 0, sizeof baddr);
+    baddr.sin_family = AF_INET;
+    baddr.sin_port = htons(5353);
+    baddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    int br = bind(s, reinterpret_cast<sockaddr*>(&baddr), sizeof baddr);
+    dbg_mark(br == 0 ? "M3-bind-ok" : "M3-bind-fail");
+
+    // Join the mDNS multicast group to receive multicast queries.
+    struct ip_mreq mreq; memset(&mreq, 0, sizeof mreq);
+    mreq.imr_multiaddr.s_addr = inet_addr("224.0.0.251");
+    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+    int jr = setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof mreq);
+    dbg_mark(jr == 0 ? "M4-join-ok" : "M4-join-fail");
+
     int ttl = 255;  // mDNS standard multicast TTL
     setsockopt(s, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof ttl);
+
+    // A receive timeout paces the re-announcements: recvfrom blocks (no CPU
+    // spin, so it cannot flood) and returns every 2s if no query arrived.
+    struct timeval rcvto; rcvto.tv_sec = 2; rcvto.tv_usec = 0;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &rcvto, sizeof rcvto);
 
     struct sockaddr_in mdst; memset(&mdst, 0, sizeof mdst);
     mdst.sin_family = AF_INET;
@@ -143,13 +172,31 @@ void mdns_thread(uint16_t port, std::string instanceLabel) {
 
     auto pkt = build_announcement(instanceLabel, host, port, ip);
     CSPOT_LOG(info, "mdns: advertising _spotify-connect._tcp on port %d", (int)port);
+    dbg_mark("M5-loop");
 
-    // Unsolicited announcement every 2s. sceKernelDelayThread yields, so this
-    // can never busy-loop or flood; mDNS resolvers cache gratuitous responses.
+    uint8_t buf[1500];
+    int sends = 0;
     while (true) {
+        // Periodic unsolicited announcement (also primes caches).
         sendto(s, pkt.data(), pkt.size(), 0,
                reinterpret_cast<sockaddr*>(&mdst), sizeof mdst);
-        sceKernelDelayThread(2000000);  // 2s
+        if (sends < 6) { char b[16]; snprintf(b, sizeof b, "M-send%d", sends++); dbg_mark(b); }
+
+        struct sockaddr_in from; socklen_t fl = sizeof from;
+        int n = recvfrom(s, buf, sizeof buf, 0,
+                         reinterpret_cast<sockaddr*>(&from), &fl);  // blocks <= 2s
+        if (n > 12) {
+            // If the packet references our service, answer immediately.
+            bool forUs = false;
+            for (int i = 0; i + 16 <= n; i++) {
+                if (memcmp(buf + i, "_spotify-connect", 16) == 0) { forUs = true; break; }
+            }
+            if (forUs) {
+                sendto(s, pkt.data(), pkt.size(), 0,
+                       reinterpret_cast<sockaddr*>(&mdst), sizeof mdst);
+                dbg_mark("M-answered");
+            }
+        }
     }
 }
 

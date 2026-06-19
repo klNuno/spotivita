@@ -261,16 +261,22 @@ int main(void) {
     sceIoMkdir("ux0:data/cspot", 0777);
     sceIoMkdir("ux0:data/cspot/cache", 0777);
 
+    sceIoRemove("ux0:data/cspot/stage.txt");
+    dbg_mark("01-main-start");
+
     init_logger();
     bell::bellGlobalLogger = std::make_shared<MenuLogger>();
+    dbg_mark("02-logger");
 
     GUI gui;
 
     init_network();
+    dbg_mark("03-network");
 
     watch_id = sceKernelCreateThread("watchdog", (SceKernelThreadEntry) watch_dog, 0x10000100, 0x4000, 0, 0, NULL);
     GUI *gui_p = &gui;
     sceKernelStartThread(watch_id, sizeof(void*), &gui_p);
+    dbg_mark("04-watchdog");
 
     file = std::make_shared<CliFile>();
     configMan = std::make_shared<ConfigJSON>(CONFIG_FILE_NAME, file);
@@ -283,8 +289,10 @@ int main(void) {
     configMan->format = AudioFormat_OGG_VORBIS_320;
 
     blob = std::make_shared<LoginBlob>();
+    dbg_mark("05-config");
 
     gui.init();
+    dbg_mark("06-gui-init-done");
 
     std::string authData;
     file->readFile(CREDENTIALS_FILE_NAME, authData);
@@ -309,7 +317,9 @@ int main(void) {
         gui.set_screen(gui.login_screen);
         start_zeroconf_thread(&gui);
     }
+    dbg_mark(autoLogin ? "07-thread-autologin" : "07-thread-zeroconf");
 
+    dbg_mark("08-pre-gui-start");
     gui.start();
 
     flush_logger();
