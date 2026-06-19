@@ -129,20 +129,12 @@ void mdns_thread(uint16_t port, std::string instanceLabel) {
         CSPOT_LOG(error, "mdns: socket() failed");
         return;
     }
-    int yes = 1;
-    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
 
-    struct sockaddr_in addr; memset(&addr, 0, sizeof addr);
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(5353);
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof addr);
-
-    // Join the mDNS multicast group (best-effort; sending still works without).
-    struct ip_mreq mreq; memset(&mreq, 0, sizeof mreq);
-    mreq.imr_multiaddr.s_addr = inet_addr("224.0.0.251");
-    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-    setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof mreq);
+    // Send-only: we only need to ANNOUNCE, not answer queries. Deliberately no
+    // bind / group join / select / recv -- on vitasdk a select that returns
+    // immediately turned the old loop into a sendto flood that froze the device.
+    int ttl = 255;  // mDNS standard multicast TTL
+    setsockopt(s, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof ttl);
 
     struct sockaddr_in mdst; memset(&mdst, 0, sizeof mdst);
     mdst.sin_family = AF_INET;
@@ -152,26 +144,12 @@ void mdns_thread(uint16_t port, std::string instanceLabel) {
     auto pkt = build_announcement(instanceLabel, host, port, ip);
     CSPOT_LOG(info, "mdns: advertising _spotify-connect._tcp on port %d", (int)port);
 
-    fd_set rf;
-    struct timeval tv;
-    uint8_t buf[1500];
+    // Unsolicited announcement every 2s. sceKernelDelayThread yields, so this
+    // can never busy-loop or flood; mDNS resolvers cache gratuitous responses.
     while (true) {
         sendto(s, pkt.data(), pkt.size(), 0,
                reinterpret_cast<sockaddr*>(&mdst), sizeof mdst);
-
-        FD_ZERO(&rf); FD_SET(s, &rf);
-        tv.tv_sec = 5; tv.tv_usec = 0;
-        int r = select(s + 1, &rf, NULL, NULL, &tv);
-        if (r > 0 && FD_ISSET(s, &rf)) {
-            struct sockaddr_in from; socklen_t fl = sizeof from;
-            int n = recvfrom(s, buf, sizeof buf, 0,
-                             reinterpret_cast<sockaddr*>(&from), &fl);
-            // Any query on the mDNS port -> re-announce immediately.
-            if (n > 0) {
-                sendto(s, pkt.data(), pkt.size(), 0,
-                       reinterpret_cast<sockaddr*>(&mdst), sizeof mdst);
-            }
-        }
+        sceKernelDelayThread(2000000);  // 2s
     }
 }
 

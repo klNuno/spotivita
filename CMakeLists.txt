@@ -58,6 +58,15 @@ string(REPLACE "list(APPEND EXTRA_LIBS dns_sd)"
                _c "${_c}")
 file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/CMakeLists.txt" "${_c}")
 
+# Defensive: bell's HTTPServer::listen() busy-loops if select() ever errors (the
+# exit() on failure is commented out). Add a small sleep so a transient select
+# failure on Vita cannot peg a core and freeze the device.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/bell/src/HTTPServer.cpp" _c)
+string(REPLACE "perror(\"select\");"
+               "perror(\"select\"); usleep(100000);"
+               _c "${_c}")
+file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/bell/src/HTTPServer.cpp" "${_c}")
+
 # add CSpot sources
 # mbedtls backend: vitasdk OpenSSL (1.0.2) lacks the 1.1+ API CryptoOpenSSL.cpp
 # needs, so bell uses CryptoMbedTLS instead (see patch/bell/CMakeLists.txt).
