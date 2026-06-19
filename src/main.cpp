@@ -7,6 +7,10 @@
 #include <psp2/io/fcntl.h>
 #include <vitaGL.h>
 
+#include <cstring>
+#include <cstdarg>
+#include <memory>
+
 #include "Paf.h"
 #include <SpircController.h>
 #include <JSONObject.h>
@@ -226,6 +230,31 @@ void start_cspot_thread(GUI *gui) {
 int print_to_menu(const char* fmt, ...);
 int vprint_to_menu(const char* fmt, va_list args);
 
+// Routes cspot/bell logs to the on-screen log view and the log file. The pinned
+// bell hardcodes printf and has no output-redirect hooks, so instead of patching
+// it we install our own logger (CSPOT_LOG/BELL_LOG go through bellGlobalLogger).
+class MenuLogger : public bell::AbstractLogger {
+    void emit(char level, const std::string& filename, int line, const char* format, va_list args) {
+        const char* base = filename.c_str();
+        const char* slash = strrchr(base, '/');
+        if (slash) { base = slash + 1; }
+        print_to_menu("%c %s:%d: ", level, base, line);
+        vprint_to_menu(format, args);
+        print_to_menu("\n");
+    }
+
+ public:
+    void debug(std::string f, int l, std::string, const char* fmt, ...) override {
+        va_list a; va_start(a, fmt); emit('D', f, l, fmt, a); va_end(a);
+    }
+    void error(std::string f, int l, std::string, const char* fmt, ...) override {
+        va_list a; va_start(a, fmt); emit('E', f, l, fmt, a); va_end(a);
+    }
+    void info(std::string f, int l, std::string, const char* fmt, ...) override {
+        va_list a; va_start(a, fmt); emit('I', f, l, fmt, a); va_end(a);
+    }
+};
+
 int main(void) {
     // Create the data dir before opening the log file, otherwise init_logger's
     // fopen fails on a fresh install (the dir does not exist yet).
@@ -233,10 +262,7 @@ int main(void) {
     sceIoMkdir("ux0:data/cspot/cache", 0777);
 
     init_logger();
-    bell::setDefaultLogger();
-    bell::disableColors();
-    bell::function_printf = &print_to_menu;
-    bell::function_vprintf = &vprint_to_menu;
+    bell::bellGlobalLogger = std::make_shared<MenuLogger>();
 
     GUI gui;
 

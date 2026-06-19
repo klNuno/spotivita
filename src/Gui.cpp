@@ -7,8 +7,9 @@
 #include "LoginScreen.h"
 
 void GUI::init() {
+    // vglUseVram was renamed to vglUseExtraMem and must run before vglInit*.
+    vglUseExtraMem(GL_TRUE);
     vglInitExtended(0, 960, 544, 0x800000, SCE_GXM_MULTISAMPLE_4X);
-    vglUseVram(GL_TRUE);
 
     // Setup ImGui binding
     ImGui::CreateContext();
@@ -92,7 +93,7 @@ void GUI::start() {
 
     // ImGui_ImplVitaGL_Shutdown();
     ImGui::DestroyContext();
-    vglEnd();
+    // vglEnd() was removed from vitaGL; the process exits right after anyway.
 }
 
 GUI::~GUI() {

@@ -1,5 +1,8 @@
 #include "CircularBuffer.h"
 
+#include <algorithm>  // std::min
+#include <cstdlib>    // malloc, free
+
 CircularBuffer::CircularBuffer(size_t dataCapacity) {
     this->dataCapacity = dataCapacity;
     buffer = (uint8_t *) malloc(dataCapacity);

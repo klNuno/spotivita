@@ -33,27 +33,39 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/ZeroconfAuthenticator.h
      DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/include)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/ApResolve.cpp
      DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/src)
+# TCPSocket.h includes <sys/ioctl.h> (absent on Vita); guarded copy.
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/TCPSocket.h
+     DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/bell/include)
+# NanoPBHelper with the HTTPClient/TLS helpers stripped (unused, OpenSSL-only).
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/NanoPBHelper.h
+     DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/bell/include)
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/NanoPBHelper.cpp
+     DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/bell/src)
+# Forked bell CMakeLists: selects the mbedtls crypto backend and drops the HTTP
+# client stack on Vita (vitasdk OpenSSL is 1.0.2, too old for CryptoOpenSSL.cpp).
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/bell/CMakeLists.txt
+     DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/bell)
 
-# Surgical edits to the pinned submodule CMakeLists (avoids forking whole files).
+# Surgical edit to the pinned cspot CMakeLists (bell is replaced wholesale above).
 #  1) CMake >= 3.27 hard-errors on cmake_minimum_required < 3.5.
 #  2) cspot links Apple Bonjour 'dns_sd' on the UNIX-but-not-Apple branch;
 #     vitasdk ships no such lib (mDNS is done by hand in ZeroconfAuthenticator).
-foreach(_sub "cspot/cspot/CMakeLists.txt" "cspot/cspot/bell/CMakeLists.txt")
-  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/${_sub}" _c)
-  string(REGEX REPLACE "cmake_minimum_required\\(VERSION[^)]*\\)"
-                       "cmake_minimum_required(VERSION 3.10)" _c "${_c}")
-  file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/${_sub}" "${_c}")
-endforeach()
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/CMakeLists.txt" _c)
+string(REGEX REPLACE "cmake_minimum_required\\(VERSION[^)]*\\)"
+                     "cmake_minimum_required(VERSION 3.10)" _c "${_c}")
 string(REPLACE "list(APPEND EXTRA_LIBS dns_sd)"
                "# list(APPEND EXTRA_LIBS dns_sd) # disabled for Vita (no Bonjour)"
                _c "${_c}")
 file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/CMakeLists.txt" "${_c}")
 
 # add CSpot sources
-# NOTE: no BELL_USE_MBEDTLS -- bell's non-ESP branch links OpenSSL, so Crypto.h
-# must resolve to CryptoOpenSSL (defining mbedtls here links neither cleanly).
+# mbedtls backend: vitasdk OpenSSL (1.0.2) lacks the 1.1+ API CryptoOpenSSL.cpp
+# needs, so bell uses CryptoMbedTLS instead (see patch/bell/CMakeLists.txt).
+add_compile_definitions(BELL_USE_MBEDTLS)
 add_compile_definitions(VITA)
+# Spotify streams OGG Vorbis (decoded by tremor); the bundled libhelix MP3/AAC
+# codecs have no Vita assembly path (assembly.h: "Unsupported platform").
+set(BELL_DISABLE_CODECS ON CACHE BOOL "no libhelix MP3/AAC on Vita" FORCE)
 add_subdirectory("cspot/cspot" ${CMAKE_CURRENT_BINARY_DIR}/cspot)
 
 find_package(CURL REQUIRED)
