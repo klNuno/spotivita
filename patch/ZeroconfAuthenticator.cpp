@@ -8,8 +8,7 @@
 #include "ConfigJSON.h"
 
 #ifdef VITA
-#include <thread>
-#include <chrono>
+#include <psp2/kernel/threadmgr.h>
 #include <cstring>
 #include <vector>
 #include <sys/socket.h>
@@ -120,7 +119,7 @@ void mdns_thread(uint16_t port, std::string instanceLabel) {
     uint8_t ip[4];
     // Wait for the network to come up.
     while (!get_local_ip(ip)) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        sceKernelDelayThread(1000000);
     }
 
     const std::string host = "cspot-vita.local";
@@ -174,6 +173,17 @@ void mdns_thread(uint16_t port, std::string instanceLabel) {
             }
         }
     }
+}
+
+// std::thread throws std::system_error on vitasdk (the libstdc++ gthread layer
+// is not active), so the mDNS responder runs on a SceKernel thread like the
+// rest of the app. Params are passed via file-static globals (single instance).
+static uint16_t g_mdns_port = 0;
+static char g_mdns_instance[64] = {0};
+
+int mdns_thread_entry(SceSize, void*) {
+    mdns_thread(g_mdns_port, std::string(g_mdns_instance));
+    return 0;
 }
 
 }  // namespace
@@ -239,10 +249,15 @@ void ZeroconfAuthenticator::registerZeroconf()
     mdns_service_add("cspot", "_spotify-connect", "_tcp", this->server->serverPort, serviceTxtData, 3);
 
 #elif defined(VITA)
-    // Vita: hand-rolled mDNS responder (vitasdk has no Bonjour/dns_sd).
-    std::thread(mdns_thread,
-                static_cast<uint16_t>(this->server->serverPort),
-                configMan->deviceName).detach();
+    // Vita: hand-rolled mDNS responder on a native thread (vitasdk has no
+    // Bonjour/dns_sd, and std::thread throws std::system_error here).
+    g_mdns_port = static_cast<uint16_t>(this->server->serverPort);
+    strncpy(g_mdns_instance, configMan->deviceName.c_str(), sizeof(g_mdns_instance) - 1);
+    int mdns_tid = sceKernelCreateThread("mdns", (SceKernelThreadEntry)mdns_thread_entry,
+                                         0x10000100, 0x4000, 0, 0, NULL);
+    if (mdns_tid >= 0) {
+        sceKernelStartThread(mdns_tid, 0, NULL);
+    }
 #else
     // DNSServiceRef ref = NULL;
     // TXTRecordRef txtRecord;
