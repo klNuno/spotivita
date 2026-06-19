@@ -69,7 +69,10 @@ void GUI::start() {
         ImGui::SetNextWindowSize(ImVec2(960.0f, 544.0f), ImGuiCond_Once);
 
         if (ImGui::Begin("CSpot", nullptr, WINDOW_FLAGS)) {
-            screen->draw();
+            Screen *current = screen.load();
+            if (current) {
+                current->draw();
+            }
 
             // ImGui::SetNextWindowPos(ImVec2(650, 20), ImGuiCond_FirstUseEver);
             // bool show = true;

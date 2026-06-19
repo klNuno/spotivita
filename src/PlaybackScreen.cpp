@@ -136,9 +136,11 @@ void PlaybackScreen::getTracks(uint16_t index) {
         }
 
         cJSON *root = cJSON_Parse((const char *) json_data);
-        if (!cJSON_HasObjectItem(root, "items")) {
+        if (root == NULL || !cJSON_HasObjectItem(root, "items")) {
             playlists[index].tracks_loaded = true;
             playlists[index].tracks.push_back("No tracks");
+            cJSON_Delete(root);
+            free(json_data);
             return;
         }
         cJSON *json_next = cJSON_GetObjectItem(root, "next");
@@ -148,7 +150,11 @@ void PlaybackScreen::getTracks(uint16_t index) {
         for (uint32_t i = 0; i < tracks_in_chunk; i++) {
             cJSON *item = cJSON_GetArrayItem(json_items, i);
             cJSON *track = cJSON_GetObjectItem(item, "track");
-            playlists[index].tracks.push_back(std::string(cJSON_GetObjectItem(track, "name")->valuestring));
+            cJSON *trackName = cJSON_GetObjectItem(track, "name");
+            // track can be null (episodes/unavailable items) and name may be missing
+            if (cJSON_IsString(trackName) && trackName->valuestring != NULL) {
+                playlists[index].tracks.push_back(std::string(trackName->valuestring));
+            }
             pos++;
         }
 
@@ -177,7 +183,9 @@ void PlaybackScreen::getPlaylists() {
         }
 
         cJSON *root = cJSON_Parse((const char *) json_data);
-        if (!cJSON_HasObjectItem(root, "items")) {
+        if (root == NULL || !cJSON_HasObjectItem(root, "items")) {
+            cJSON_Delete(root);
+            free(json_data);
             return;
         }
         cJSON *json_next = cJSON_GetObjectItem(root, "next");
@@ -186,8 +194,13 @@ void PlaybackScreen::getPlaylists() {
 
         for (uint32_t i = 0; i < playlists_in_chunk; i++) {
             cJSON *item = cJSON_GetArrayItem(json_items, i);
-            playlists.push_back({std::string(cJSON_GetObjectItem(item, "name")->valuestring),
-                                    std::string(cJSON_GetObjectItem(item, "uri")->valuestring), {}, false});
+            cJSON *pname = cJSON_GetObjectItem(item, "name");
+            cJSON *puri = cJSON_GetObjectItem(item, "uri");
+            if (cJSON_IsString(pname) && pname->valuestring != NULL &&
+                cJSON_IsString(puri) && puri->valuestring != NULL) {
+                playlists.push_back({std::string(pname->valuestring),
+                                        std::string(puri->valuestring), {}, false});
+            }
             pos++;
         }
 
@@ -214,7 +227,7 @@ void PlaybackScreen::drawSubmenu() {
             break;
         case Submenu::PLAYLISTS:
             for (uint16_t i = 0; i < playlists.size(); i++) {
-                if (ImGui::TreeNode((void*)(intptr_t)i, playlists[i].name.c_str())) {
+                if (ImGui::TreeNode((void*)(intptr_t)i, "%s", playlists[i].name.c_str())) {
                     if (!playlists[i].tracks_loaded) {
                         CSPOT_LOG(debug, "request track list for playlist: %s", playlists[i].name.c_str());
                         getTracks(i);

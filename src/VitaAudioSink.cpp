@@ -38,19 +38,27 @@ static int feedBlocking() {
 VitaAudioSink::VitaAudioSink() {
     softwareVolumeControl = false;
 
+    // Reset shared state so a re-created sink (logout/relogin) starts clean:
+    // end_flag is a file-static and would otherwise stay 1 from a prior dtor,
+    // making the new feed thread exit immediately (no audio).
+    end_flag = 0;
+    buffer.emptyBuffer();
+
     sceAppMgrReleaseBgmPort();
     sceAppMgrAcquireBgmPort();
 
     port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_BGM, VITA_DECODE_SIZE, 44100, SCE_AUDIO_OUT_MODE_STEREO);
 
-    threadid = sceKernelCreateThread("audio output", (SceKernelThreadEntry)feedBlocking, 0x10000100, 0x100, 0, 0, NULL);
+    threadid = sceKernelCreateThread("audio output", (SceKernelThreadEntry)feedBlocking, 0x10000100, 0x4000, 0, 0, NULL);
     sceKernelStartThread(threadid, 0, NULL);
 }
 
 VitaAudioSink::~VitaAudioSink() {
+    // Stop and join the feed thread BEFORE releasing the port, otherwise the
+    // still-running thread can call sceAudioOutOutput on a released port.
     end_flag = 1;
-    sceAudioOutReleasePort(port);
     sceKernelWaitThreadEnd(threadid, NULL, NULL);
+    sceAudioOutReleasePort(port);
 }
 
 void VitaAudioSink::feedPCMFrames(const uint8_t *buf, size_t bytes) {

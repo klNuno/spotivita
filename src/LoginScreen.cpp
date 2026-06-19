@@ -1,9 +1,10 @@
 #include "LoginScreen.h"
 #include "Gui.h"
 
-void start_cspot_thread(GUI *gui);
-void login_cspot(const char *user, const char *password);
-
+// Spotify killed username/password login in 2024, so the Vita can no longer log
+// in with typed credentials. Instead it advertises itself as a Spotify Connect
+// device (mDNS, started from main) and waits for the user's phone to hand over
+// an authentication blob. This screen just tells the user how to do that.
 void LoginScreen::draw() {
     // top spacer
     ImGui::Dummy(ImVec2(0.0f, 42.0f));
@@ -11,34 +12,22 @@ void LoginScreen::draw() {
     // cspot logo
     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + logo_width);
     ImGui::Image(reinterpret_cast<void*>(logo_tex), ImVec2(logo_width, logo_height));
-    ImGui::Dummy(ImVec2(0.0f, 5.0f));
+    ImGui::Dummy(ImVec2(0.0f, 28.0f));
 
-    username.draw(ImVec2(ImGui::GetContentRegionAvail().x * 0.5f, 0.0f));
-    ImGui::Dummy(ImVec2(0.0f, 10.0f));
-    password.draw(ImVec2(ImGui::GetContentRegionAvail().x * 0.5f, 0.0f));
+    TextCentered("Waiting for Spotify Connect");
+    ImGui::Dummy(ImVec2(0.0f, 14.0f));
 
-    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(30, 215, 96, 255));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(16, 117, 52, 255));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 24.0f);
+    TextCentered("1. Put your phone on the same Wi-Fi as the Vita");
+    TextCentered("2. Open Spotify on your phone");
+    TextCentered("3. Tap the Connect (devices) icon");
+    TextCentered("4. Pick \"PS Vita (CSpot)\" in the device list");
 
-    ImGui::Dummy(ImVec2(0.0f, 10.0f));
-    if (ButtonCenteredOnLine("LOG IN", 0.5f,
-        ImVec2(ImGui::GetContentRegionAvail().x * 0.25f, 50.0f))) {
-        gui->set_screen(gui->playback_screen);
-        login_cspot(username.buffer, password.buffer);
-        start_cspot_thread(gui);
-    }
-
-    ImGui::PopStyleVar();  // ImGuiStyleVar_FrameRounding
-    ImGui::PopStyleColor();  // ImGuiCol_ButtonHovered
-    ImGui::PopStyleColor();  // ImGuiCol_Button
+    ImGui::Dummy(ImVec2(0.0f, 14.0f));
+    TextCentered("Spotify Premium required.");
 }
 
 LoginScreen::LoginScreen(GUI *gui) : Screen(gui) {
-    bool ret = LoadTextureFromFile("icon_alpha.png", &logo_tex, &logo_width, &logo_height);
-
-    username = TextInput(ImVec2(0.0f, 0.5f), 0.5f, ENTER_USERNAME_PROMPT, INPUT_USERNAME_HINT);
-    password = TextInput(ImVec2(0.0f, 0.5f), 0.5f, ENTER_PASSWORD_PROMPT, INPUT_PASSWORD_HINT, true);
+    LoadTextureFromFile("icon_alpha.png", &logo_tex, &logo_width, &logo_height);
 }
 
 LoginScreen::~LoginScreen() {

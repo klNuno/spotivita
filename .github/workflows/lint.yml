@@ -22,3 +22,19 @@ jobs:
 
     - name: lint
       run: ./lint
+
+  build:
+    runs-on: ubuntu-latest
+    container: vitasdk/vitasdk:latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Install build deps
+      run: apk add --no-cache protobuf protobuf-dev cmake make git
+
+    - name: Build VPK
+      run: |
+        mkdir build && cd build
+        cmake .. && make -j$(nproc)

@@ -15,7 +15,7 @@ bool CliFile::readFile(std::string filename, std::string &fileContent) {
 bool CliFile::writeFile(std::string filename, std::string fileContent) {
   FILE* fd = fopen(filename.c_str(), "w");
 
-  if (fd < 0) {
+  if (fd == NULL) {
     return false;
   }
 

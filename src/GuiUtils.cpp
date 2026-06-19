@@ -25,7 +25,10 @@ void init_logger() {
 }
 
 void flush_logger() {
-    fflush(logger_fp);
+    // Guard the NULL case: fflush(NULL) flushes every open stream, not intended.
+    if (logger_fp != NULL) {
+        fflush(logger_fp);
+    }
 }
 
 // override printf for cspot
@@ -96,7 +99,9 @@ void TextCentered(std::string text) {
     auto textWidth   = ImGui::CalcTextSize(text.c_str()).x;
 
     ImGui::SetCursorPosX((avail - textWidth) * 0.5f);
-    ImGui::Text(text.c_str());
+    // TextUnformatted, not Text: track/artist names come from Spotify and can
+    // contain '%', which ImGui::Text would interpret as a printf format.
+    ImGui::TextUnformatted(text.c_str());
 }
 
 bool StyleButton(const char* label, ImVec2 btn_size, bool active) {

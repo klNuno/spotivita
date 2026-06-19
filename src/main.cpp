@@ -12,6 +12,8 @@
 #include <JSONObject.h>
 #include <ConfigJSON.h>
 #include <Logger.h>
+#include <HTTPServer.h>
+#include <ZeroconfAuthenticator.h>
 
 #include "CliFile.h"
 #include "VitaAudioSink.h"
@@ -36,9 +38,12 @@ std::shared_ptr<CliFile> file;
 std::shared_ptr<MercuryManager> mercuryManager;
 std::shared_ptr<SpircController> spircController;
 std::shared_ptr<LoginBlob> blob;
+std::shared_ptr<bell::HTTPServer> httpServer;
+std::shared_ptr<ZeroconfAuthenticator> zeroconfAuth;
 
 static int watch_id;
 static int cspot_id;
+static int zeroconf_id;
 
 SceVoid watch_dog(SceSize _args, void *_argp) {
     GUI* gui = *((GUI**)_argp);
@@ -73,15 +78,42 @@ SceVoid watch_dog(SceSize _args, void *_argp) {
     }
 }
 
-void login_cspot(const char *user, const char *password) {
-    blob->loadUserPass(user, password);
+void start_cspot_thread(GUI *gui);
+
+// Spotify Connect (Zeroconf) login. The Vita advertises itself over mDNS and
+// serves the /spotify_info endpoint; the user's phone hands us an encrypted
+// credentials blob (authType STORED_SPOTIFY_CREDENTIALS, still AP-accepted),
+// replacing the dead username/password flow (Spotify removed it in 2024).
+int start_zeroconf(SceSize _args, void *_argp) {
+    GUI* gui = *((GUI**)_argp);
+
+    httpServer = std::make_shared<bell::HTTPServer>(2137);
+    zeroconfAuth = std::make_shared<ZeroconfAuthenticator>(
+        [gui](std::shared_ptr<LoginBlob> b) {
+            blob = b;
+            // The zeroconf blob carries reusable stored credentials. start_cspot
+            // persists it once authentication actually succeeds, so subsequent
+            // boots auto-login without the phone.
+            gui->set_screen(gui->playback_screen);
+            start_cspot_thread(gui);
+        },
+        httpServer);
+    zeroconfAuth->registerHandlers();
+    httpServer->listen();  // blocks, serving HTTP until the process exits
+    return 0;
+}
+
+void start_zeroconf_thread(GUI *gui) {
+    zeroconf_id = sceKernelCreateThread("zeroconf", (SceKernelThreadEntry)start_zeroconf,
+                                        0x10000100, 0x10000, 0, 0, NULL);
+    sceKernelStartThread(zeroconf_id, sizeof(void*), &gui);
 }
 
 int start_cspot(SceSize _args, void *_argp) {
     GUI* gui = *((GUI**)_argp);
 
     CSPOT_LOG(info, "Creating player");
-    auto session = std::make_unique<Session>(configMan);
+    auto session = std::make_unique<Session>();
     session->connectWithRandomAp();
     auto token = session->authenticate(blob);
 
@@ -99,7 +131,7 @@ int start_cspot(SceSize _args, void *_argp) {
             sceKernelDelayThread(10000);
         }
 
-        spircController = std::make_shared<SpircController>(mercuryManager, blob->username, audioSink, configMan);
+        spircController = std::make_shared<SpircController>(mercuryManager, blob->username, audioSink);
 
         // Request token for player control
         mercuryCallback responseLambda = [=](std::unique_ptr<MercuryResponse> res) {
@@ -109,10 +141,19 @@ int start_cspot(SceSize _args, void *_argp) {
             }
 
             cJSON *root = cJSON_Parse((const char *) res->parts[0].data());
-            gui->api.set_token(cJSON_GetObjectItem(root, "accessToken")->valuestring);
-            gui->cspot_started = true;
+            if (root == NULL) {
+                CSPOT_LOG(error, "Token response: invalid JSON");
+                return;
+            }
+            cJSON *accessToken = cJSON_GetObjectItem(root, "accessToken");
+            if (cJSON_IsString(accessToken) && accessToken->valuestring != NULL) {
+                gui->api.set_token(accessToken->valuestring);
+                gui->cspot_started = true;
+                CSPOT_LOG(debug, "Got token");
+            } else {
+                CSPOT_LOG(error, "Token response missing accessToken");
+            }
             cJSON_Delete(root);
-            CSPOT_LOG(debug, "Got token");
         };
         mercuryManager->execute(MercuryType::GET, "hm://keymaster/token/authenticated?scope="
                             + std::string(SCOPES) +"&client_id="
@@ -167,8 +208,13 @@ int start_cspot(SceSize _args, void *_argp) {
 
         spircController->disconnect();
     }
-    // login failed, back to login
+    // Login finished: auth was rejected, or the app is shutting down. If we are
+    // still running, the credentials were declined (e.g. a stale cached blob):
+    // drop to the waiting screen and (re)start Zeroconf so the user can re-pair.
     gui->set_screen(gui->login_screen);
+    if (gui->isRunning && zeroconf_id == 0) {
+        start_zeroconf_thread(gui);
+    }
     return 0;
 }
 
@@ -181,6 +227,11 @@ int print_to_menu(const char* fmt, ...);
 int vprint_to_menu(const char* fmt, va_list args);
 
 int main(void) {
+    // Create the data dir before opening the log file, otherwise init_logger's
+    // fopen fails on a fresh install (the dir does not exist yet).
+    sceIoMkdir("ux0:data/cspot", 0777);
+    sceIoMkdir("ux0:data/cspot/cache", 0777);
+
     init_logger();
     bell::setDefaultLogger();
     bell::disableColors();
@@ -191,12 +242,9 @@ int main(void) {
 
     init_network();
 
-    watch_id = sceKernelCreateThread("watchdog", (SceKernelThreadEntry) watch_dog, 0x10000100, 0x100, 0, 0, NULL);
+    watch_id = sceKernelCreateThread("watchdog", (SceKernelThreadEntry) watch_dog, 0x10000100, 0x4000, 0, 0, NULL);
     GUI *gui_p = &gui;
     sceKernelStartThread(watch_id, sizeof(void*), &gui_p);
-
-    sceIoMkdir("ux0:data/cspot", 0777);
-    sceIoMkdir("ux0:data/cspot/cache", 0777);
 
     file = std::make_shared<CliFile>();
     configMan = std::make_shared<ConfigJSON>(CONFIG_FILE_NAME, file);
@@ -214,12 +262,26 @@ int main(void) {
 
     std::string authData;
     file->readFile(CREDENTIALS_FILE_NAME, authData);
+    bool autoLogin = false;
     if (authData.length() > 0) {
         blob->loadJson(authData);
+        // authType 0 == AUTHENTICATION_USER_PASS is dead: Spotify removed it in
+        // 2024, so a legacy cached blob always gets AUTH_DECLINED. Ignore it and
+        // fall back to the Zeroconf flow. Zeroconf blobs persist authType 1.
+        if (blob->authType != 0) {
+            autoLogin = true;
+        } else {
+            CSPOT_LOG(info, "Ignoring legacy user/pass credentials (no longer accepted)");
+        }
+    }
+
+    if (autoLogin) {
         start_cspot_thread(&gui);
         gui.set_screen(gui.playback_screen);
     } else {
+        // Show the "waiting for Spotify Connect" screen and start advertising.
         gui.set_screen(gui.login_screen);
+        start_zeroconf_thread(&gui);
     }
 
     gui.start();
@@ -230,9 +292,14 @@ int main(void) {
     term_network();
 
     sceKernelWaitThreadEnd(watch_id, NULL, NULL);
-    sceKernelWaitThreadEnd(cspot_id, NULL, NULL);
     sceKernelDeleteThread(watch_id);
-    sceKernelDeleteThread(cspot_id);
+    // cspot_id stays 0 until the user actually logs in (Zeroconf mode); only
+    // join/delete it if it was started. The zeroconf thread blocks in listen()
+    // and is reaped by sceKernelExitProcess below.
+    if (cspot_id != 0) {
+        sceKernelWaitThreadEnd(cspot_id, NULL, NULL);
+        sceKernelDeleteThread(cspot_id);
+    }
 
     flush_logger();
 

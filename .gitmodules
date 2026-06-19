@@ -1,0 +1,3 @@
+[submodule "cspot"]
+	path = cspot
+	url = https://github.com/michal4132/cspot

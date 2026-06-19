@@ -22,6 +22,8 @@ class GUI {
     ImFont *log_font;
     Screen *login_screen = nullptr;
     Screen *playback_screen = nullptr;
+    // screen is swapped from the cspot worker thread and read every render
+    // frame, so it must be atomic (the Vita has a weak memory model).
     void set_screen(Screen *s) { screen = s; }
 
     bool cspot_started = false;
@@ -36,7 +38,7 @@ class GUI {
     std::function<void()> activateDevice;
 
  private:
-    Screen *screen;
+    std::atomic<Screen*> screen{nullptr};
 };
 
 int init_gui();

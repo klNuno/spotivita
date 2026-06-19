@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.0)
+cmake_minimum_required(VERSION 3.10)
 
 set(VITA_APP_NAME "CSpot")
 set(VITA_TITLEID  "CSPOT0021")
@@ -20,14 +20,39 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu11")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti -std=c++20")
 set(CMAKE_CXX_STANDARD 20)
 
-# patch CSpot and bell
+# --- Patch the pinned cspot/bell submodule for the Vita toolchain ---------
+# The cspot submodule is pinned at an old commit; these overrides are applied
+# in-place at configure time so the checkout itself stays otherwise clean.
+
+# Full-file Vita replacements copied over the submodule.
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/Queue.h
      DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/bell/include)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/ZeroconfAuthenticator.cpp
      DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/src)
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/ZeroconfAuthenticator.h
+     DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/include)
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/ApResolve.cpp
+     DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/src)
+
+# Surgical edits to the pinned submodule CMakeLists (avoids forking whole files).
+#  1) CMake >= 3.27 hard-errors on cmake_minimum_required < 3.5.
+#  2) cspot links Apple Bonjour 'dns_sd' on the UNIX-but-not-Apple branch;
+#     vitasdk ships no such lib (mDNS is done by hand in ZeroconfAuthenticator).
+foreach(_sub "cspot/cspot/CMakeLists.txt" "cspot/cspot/bell/CMakeLists.txt")
+  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/${_sub}" _c)
+  string(REGEX REPLACE "cmake_minimum_required\\(VERSION[^)]*\\)"
+                       "cmake_minimum_required(VERSION 3.10)" _c "${_c}")
+  file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/${_sub}" "${_c}")
+endforeach()
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/CMakeLists.txt" _c)
+string(REPLACE "list(APPEND EXTRA_LIBS dns_sd)"
+               "# list(APPEND EXTRA_LIBS dns_sd) # disabled for Vita (no Bonjour)"
+               _c "${_c}")
+file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/CMakeLists.txt" "${_c}")
 
 # add CSpot sources
-add_compile_definitions(BELL_USE_MBEDTLS)
+# NOTE: no BELL_USE_MBEDTLS -- bell's non-ESP branch links OpenSSL, so Crypto.h
+# must resolve to CryptoOpenSSL (defining mbedtls here links neither cleanly).
 add_compile_definitions(VITA)
 add_subdirectory("cspot/cspot" ${CMAKE_CURRENT_BINARY_DIR}/cspot)
 
@@ -37,7 +62,7 @@ find_package(OpenSSL REQUIRED)
 include_directories(
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/cspot/cspot/include
-  ${CMAKE_SOURCE_DIR}/cspot/bell/include
+  ${CMAKE_SOURCE_DIR}/cspot/cspot/bell/include
 )
 
 add_executable(${PROJECT_NAME}
