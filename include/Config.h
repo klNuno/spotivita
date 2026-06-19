@@ -1,8 +1,12 @@
 #pragma once
 
-#define DEVICE_NAME           "PS Vita (CSpot)"
+#define DEVICE_NAME           "psvitify"
 #define CREDENTIALS_FILE_NAME "ux0:data/cspot/authBlob.json"
 #define CONFIG_FILE_NAME      "ux0:data/cspot/config.json"
+
+// CA bundle shipped inside the VPK (app0:); used to verify TLS server certs on
+// the Spotify Web API + image CDN. Verification needs a correct Vita clock.
+#define TLS_CA_BUNDLE         "app0:cacert.pem"
 
 #define CLIENT_ID_ANDROID     "65b708073fc0480ea92a077233ca87bd"
 #define DEVICE_ID             "142137fd329622137a14901634264e6f332e2411"

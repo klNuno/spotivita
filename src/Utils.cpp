@@ -22,6 +22,10 @@ void dbg_mark(const char *s) {
 #include "image/stb_image.h"
 
 
+// Hard cap on any single HTTP response held in RAM. Cover art is tens of KB and
+// API JSON is small; this just stops a runaway or hostile transfer from OOMing.
+#define MAX_DOWNLOAD_SIZE (8 * 1024 * 1024)
+
 struct MemoryStruct {
   char *memory;
   size_t size;
@@ -30,6 +34,11 @@ struct MemoryStruct {
 static size_t WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
     size_t realsize = size * nmemb;
     struct MemoryStruct *mem = (struct MemoryStruct *)userp;
+
+    if (mem->size + realsize > MAX_DOWNLOAD_SIZE) {
+        CSPOT_LOG(error, "download exceeds %d byte cap, aborting", MAX_DOWNLOAD_SIZE);
+        return 0;
+    }
 
     char *ptr = (char *) realloc(mem->memory, mem->size + realsize + 1);
     if (!ptr) {
@@ -82,9 +91,18 @@ int download(const char *url, uint8_t **return_buffer, const char *method, std::
     curl_easy_setopt(curl_handle, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
     curl_easy_setopt(curl_handle, CURLOPT_WRITEDATA, (void *)&chunk);
     curl_easy_setopt(curl_handle, CURLOPT_USERAGENT, USER_AGENT);
-    curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST, 0L);
-    curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYPEER, 0L);
+    // Verify the server cert against the bundled CA store. This was disabled
+    // (VERIFYHOST/PEER 0), which let anyone on the network MITM the Spotify Web
+    // API traffic -- and that traffic carries the bearer token. Needs a correct
+    // system clock on the Vita.
+    curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl_handle, CURLOPT_CAINFO, TLS_CA_BUNDLE);
     curl_easy_setopt(curl_handle, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+    // Never let a stalled transfer wedge the caller (cover art + API run on the
+    // cspot and GUI threads); bound both connect and total time.
+    curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT, 10L);
+    curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, 30L);
     curl_easy_setopt(curl_handle, CURLOPT_CUSTOMREQUEST, method);
 
     if (post_data.size() != 0) {
@@ -116,6 +134,7 @@ int download(const char *url, uint8_t **return_buffer, const char *method, std::
         *return_buffer = (uint8_t *) chunk.memory;
     }
     curl_easy_cleanup(curl_handle);
+    curl_slist_free_all(headerchunk);  // was leaked on every request (NULL-safe)
     return chunk.size;
 }
 

@@ -28,6 +28,7 @@
 #include "Gui.h"
 #include "API.h"
 #include "Config.h"
+#include "Login5.h"
 
 // TODO(michal4132):
 // - settings screen
@@ -137,45 +138,55 @@ int start_cspot(SceSize _args, void *_argp) {
 
         spircController = std::make_shared<SpircController>(mercuryManager, blob->username, audioSink);
 
-        // Request token for player control
-        mercuryCallback responseLambda = [=](std::unique_ptr<MercuryResponse> res) {
-            if (res->parts.size() == 0) {
-                CSPOT_LOG(debug, "Empty response");
-                return;
-            }
-
-            cJSON *root = cJSON_Parse((const char *) res->parts[0].data());
-            if (root == NULL) {
-                CSPOT_LOG(error, "Token response: invalid JSON");
-                return;
-            }
-            cJSON *accessToken = cJSON_GetObjectItem(root, "accessToken");
-            if (cJSON_IsString(accessToken) && accessToken->valuestring != NULL) {
-                gui->api.set_token(accessToken->valuestring);
-                gui->cspot_started = true;
-                CSPOT_LOG(debug, "Got token");
+        // Spotify retired the keymaster Mercury token endpoint (it now answers
+        // {"code":4,"errorDescription":"Invalid request"} for stored-credential
+        // sessions). Mint the Web API access token via login5 from the stored
+        // credentials instead. Player controls run through spirc and don't need
+        // the token, so flag the controller ready before the blocking fetch.
+        gui->cspot_started = true;
+        {
+            std::string accessToken = login5_get_access_token(
+                CLIENT_ID_ANDROID, DEVICE_ID, USER_AGENT, blob->username, blob->authData);
+            if (!accessToken.empty()) {
+                gui->api.set_token(accessToken);
             } else {
-                CSPOT_LOG(error, "Token response missing accessToken");
+                CSPOT_LOG(error, "login5: no Web API token; in-app browsing disabled");
             }
-            cJSON_Delete(root);
-        };
-        mercuryManager->execute(MercuryType::GET, "hm://keymaster/token/authenticated?scope="
-                            + std::string(SCOPES) +"&client_id="
-                            + std::string(CLIENT_ID_ANDROID) +"&device_id=" + std::string(DEVICE_ID), responseLambda);
+        }
 
-        // Add event handler
+        // Feed the shared PlayerModel; the GUI thread observes it (no casts into
+        // the screen, no direct cspot coupling). get_if avoids a throwing variant
+        // access if an event ever carries an unexpected payload type.
         spircController->setEventHandler([gui](CSpotEvent &event) {
             switch (event.eventType) {
-                case CSpotEventType::TRACK_INFO: {
-                    TrackInfo track = std::get<TrackInfo>(event.data);
-                    ((PlaybackScreen*) gui->playback_screen)->setTrack(track.name, track.album,
-                                                                            track.artist, track.imageUrl);
+                case CSpotEventType::TRACK_INFO:
+                    if (auto t = std::get_if<TrackInfo>(&event.data)) {
+                        gui->player.setTrack(t->name, t->album, t->artist,
+                                             t->imageUrl, t->duration);
+                    }
                     break;
-                }
-                case CSpotEventType::PLAY_PAUSE: {
-                    ((PlaybackScreen*) gui->playback_screen)->setPause(std::get<bool>(event.data));
+                case CSpotEventType::PLAY_PAUSE:
+                    if (auto p = std::get_if<bool>(&event.data)) {
+                        gui->player.setPaused(*p);
+                    }
                     break;
-                }
+                case CSpotEventType::SEEK:
+                    if (auto p = std::get_if<int>(&event.data)) {
+                        gui->player.setPosition(*p);
+                    }
+                    break;
+                case CSpotEventType::LOAD:
+                    gui->player.setPosition(0);
+                    break;
+                case CSpotEventType::PLAYBACK_START:
+                    gui->player.setPosition(0);
+                    gui->player.setPaused(false);
+                    break;
+                case CSpotEventType::VOLUME:
+                    if (auto p = std::get_if<int>(&event.data)) {
+                        gui->player.setVolume(*p);
+                    }
+                    break;
                 default:
                     break;
             }
@@ -199,6 +210,10 @@ int start_cspot(SceSize _args, void *_argp) {
 
         gui->playToggleCallback = []() {
             return spircController->playToggle();
+        };
+
+        gui->volumeCallback = [](int v) {
+            return spircController->setVolume(v);
         };
 
         mercuryManager->reconnectedCallback = []() {

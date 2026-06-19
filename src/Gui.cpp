@@ -2,71 +2,144 @@
 #include "GuiUtils.h"
 #include "Utils.h"
 #include <Logger.h>
+#include <cstdint>
 #include <cstdio>
+#include <psp2/ctrl.h>
+#include <psp2/touch.h>
+#include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/processmgr.h>
 #include "Font.h"
 #include "PlaybackScreen.h"
 #include "LoginScreen.h"
 
-void GUI::init() {
-    // NOTE: the original working app called vglInitExtended directly. A stray
-    // vglUseExtraMem(GL_TRUE) was added during the build-restore and is removed
-    // here: it changes vitaGL's internal memory pools and is not needed.
-    dbg_mark("G0-vglInit-pre");
-    vglInitExtended(0, 960, 544, 0x800000, SCE_GXM_MULTISAMPLE_4X);
-    dbg_mark("G1-vglInit-done");
+namespace {
 
-    // ROOT-CAUSE FIX: imgui-vita's NewFrame derives io.DisplaySize from the live
-    // GL viewport, and its RenderDrawData early-returns when DisplaySize is 0 --
-    // so nothing ImGui-drawn ever shows. Older vitaGL seeded a 960x544 viewport at
-    // init; the current one leaves it at 0x0, deadlocking that path forever (the
-    // code that would set the viewport never runs). Seed it once, explicitly.
+// imgui-vita ships Dear ImGui ~1.61 (2018): none of the modern idle helpers
+// exist, so frame-gate by hand. After the last input event, keep rendering a few
+// frames (popups/combos take ~4 to settle), then stop building until something
+// changes. This -- not a lighter toolkit or a slower clock -- is what makes the
+// app sip power: a static UI does ~no CPU build and ~no GPU work.
+const int WAKE_FRAMES = 4;
+const uint64_t TICK_US = 1000000;         // 1 Hz rebuild: advances elapsed time
+const uint64_t IDLE_PRESENT_US = 66000;   // ~15 fps re-present to keep FB live
+const uint64_t MAX_NAP_US = 33000;        // re-probe input at >= 30 Hz
+
+struct InputSnapshot {
+    uint32_t buttons = 0;
+    uint8_t lx = 128, ly = 128, rx = 128, ry = 128;
+    uint16_t touchNum = 0, tx = 0, ty = 0;
+    bool operator!=(const InputSnapshot& o) const {
+        return buttons != o.buttons || lx != o.lx || ly != o.ly || rx != o.rx ||
+               ry != o.ry || touchNum != o.touchNum || tx != o.tx || ty != o.ty;
+    }
+};
+
+InputSnapshot sampleInput() {
+    InputSnapshot s;
+    SceCtrlData pad;
+    if (sceCtrlPeekBufferPositive(0, &pad, 1) > 0) {
+        s.buttons = pad.buttons;
+        // Mask the low bits so resting analog jitter isn't read as movement.
+        s.lx = pad.lx & 0xF0; s.ly = pad.ly & 0xF0;
+        s.rx = pad.rx & 0xF0; s.ry = pad.ry & 0xF0;
+    }
+    SceTouchData touch;
+    if (sceTouchPeek(SCE_TOUCH_PORT_FRONT, &touch, 1) > 0) {
+        s.touchNum = touch.reportNum;
+        if (touch.reportNum > 0) {
+            s.tx = touch.report[0].x & 0xFFF0;
+            s.ty = touch.report[0].y & 0xFFF0;
+        }
+    }
+    return s;
+}
+
+// True while the user is actively holding/touching: keep rendering so scroll and
+// drag stay smooth instead of settling after WAKE_FRAMES.
+bool inputActive(const InputSnapshot& s) {
+    bool stick = s.lx < 0x60 || s.lx > 0xA0 || s.ly < 0x60 || s.ly > 0xA0 ||
+                 s.rx < 0x60 || s.rx > 0xA0 || s.ry < 0x60 || s.ry > 0xA0;
+    return s.buttons != 0 || stick || s.touchNum > 0;
+}
+
+void applySpotifyTheme() {
+    ImGui::StyleColorsDark();
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding = 0.0f;
+    style.WindowBorderSize = 0.0f;
+    style.FrameRounding = 4.0f;
+    style.ScrollbarRounding = 4.0f;
+    style.WindowPadding = ImVec2(16.0f, 16.0f);
+    style.ItemSpacing = ImVec2(12.0f, 10.0f);
+
+    ImVec4 base  = ImVec4(0.07f, 0.07f, 0.07f, 1.00f);  // #121212
+    ImVec4 elev  = ImVec4(0.09f, 0.09f, 0.09f, 1.00f);  // #181818
+    ImVec4 card  = ImVec4(0.16f, 0.16f, 0.16f, 1.00f);  // #282828
+    ImVec4 green = ImVec4(0.12f, 0.84f, 0.38f, 1.00f);  // #1ED760
+    ImVec4 grey  = ImVec4(0.70f, 0.70f, 0.70f, 1.00f);  // #B3B3B3
+
+    ImVec4* c = style.Colors;
+    c[ImGuiCol_WindowBg]         = base;
+    c[ImGuiCol_ChildBg]          = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_PopupBg]          = elev;
+    c[ImGuiCol_Text]             = ImVec4(1, 1, 1, 1);
+    c[ImGuiCol_TextDisabled]     = grey;
+    c[ImGuiCol_Button]           = card;
+    c[ImGuiCol_ButtonHovered]    = elev;
+    c[ImGuiCol_ButtonActive]     = green;
+    c[ImGuiCol_FrameBg]          = card;
+    c[ImGuiCol_FrameBgHovered]   = elev;
+    c[ImGuiCol_FrameBgActive]    = card;
+    c[ImGuiCol_Header]           = card;
+    c[ImGuiCol_HeaderHovered]    = elev;
+    c[ImGuiCol_HeaderActive]     = card;
+    c[ImGuiCol_SliderGrab]       = green;
+    c[ImGuiCol_SliderGrabActive] = green;
+    c[ImGuiCol_CheckMark]        = green;
+    c[ImGuiCol_ScrollbarBg]      = ImVec4(0, 0, 0, 0);
+    c[ImGuiCol_ScrollbarGrab]    = card;
+}
+
+}  // namespace
+
+void GUI::init() {
+    // No MSAA: the UI is flat axis-aligned quads + font-atlas text, and ImGui
+    // does its own geometry AA, so 4X only burned fill rate and memory. (Sysapp
+    // mode silently floors NONE to 2X, which is harmless.)
+    vglInitExtended(0, 960, 544, 0x800000, SCE_GXM_MULTISAMPLE_NONE);
+
+    // imgui-vita derives io.DisplaySize from the live GL viewport inside NewFrame
+    // and skips all rendering when it is 0; current vitaGL doesn't seed one, so
+    // set it here and again every rendered frame.
     glViewport(0, 0, 960, 544);
     glScissor(0, 0, 960, 544);
-    dbg_mark("G1b-viewport");
 
-    // Setup ImGui binding
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
     ImGui_ImplVitaGL_Init();
-    dbg_mark("G2-imgui-init");
     io.MouseDrawCursor = false;
 
     font = AddDefaultFont(26);
     log_font = AddDefaultFont(12);
 
-    // Add icon font
-    ImFontConfig icons_config;
-    icons_config.OversampleH = icons_config.OversampleV = 1;
-    icons_config.PixelSnapH = true;
+    static const ImWchar latin[] = { 0x0020, 0x017F, 0 };
+    font_bold = io.Fonts->AddFontFromFileTTF("PlusJakartaSans-Bold.ttf", 30.0f, NULL, latin);
 
-    ImWchar playback_ranges[] = {
-        0xf144, 0xf144,  // play icon
-        0xf28b, 0xf28b,  // pause icon
-        0,
-    };
-
+    ImWchar playback_ranges[] = { 0xf144, 0xf144, 0xf28b, 0xf28b, 0 };
     ImWchar ranges[] = {
-        0xf048, 0xf048,  // backward icon
-        0xf051, 0xf051,  // forward icon
-        0xf013, 0xf013,  // cog (settings) icon
-        0xf02d, 0xf02d,  // book (log) icon
-        0xf002, 0xf002,  // search icon
-        0xf001, 0xf001,  // music icon
+        0xf048, 0xf048,  // backward
+        0xf051, 0xf051,  // forward
+        0xf013, 0xf013,  // cog
+        0xf02d, 0xf02d,  // book
+        0xf002, 0xf002,  // search
+        0xf001, 0xf001,  // music
         0,
     };
-
-    icon_font = io.Fonts->AddFontFromFileTTF(FONT_ICON_FILE_NAME_FAS, 48.0f, NULL, ranges);
-    playback_icon_font = io.Fonts->AddFontFromFileTTF(FONT_ICON_FILE_NAME_FAS, 96.0f, NULL, playback_ranges);
+    icon_font = io.Fonts->AddFontFromFileTTF(FONT_ICON_FILE_NAME_FAS, 40.0f, NULL, ranges);
+    playback_icon_font = io.Fonts->AddFontFromFileTTF(FONT_ICON_FILE_NAME_FAS, 84.0f, NULL, playback_ranges);
     io.Fonts->Build();
-    dbg_mark("G3-fonts-built");
 
-    // Setup style
-    ImGui::StyleColorsDark();
-
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.Colors[ImGuiCol_WindowBg] = BACKGROUND_COLOR;
-    style.WindowRounding = 0.0f;
-    style.WindowBorderSize = 0.0f;
+    applySpotifyTheme();
 
     ImGui_ImplVitaGL_TouchUsage(true);
     ImGui_ImplVitaGL_UseIndirectFrontTouch(false);
@@ -76,80 +149,78 @@ void GUI::init() {
 
     login_screen = new LoginScreen(this);
     playback_screen = new PlaybackScreen(this);
-    dbg_mark("G4-screens-ready");
 }
 
 void GUI::start() {
-    bool first = true;
-    unsigned long fcount = 0;
+    sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
+    sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
+
+    InputSnapshot prev = sampleInput();
+    int wake = WAKE_FRAMES;
+    uint64_t last_tick = 0, last_present = 0;
+    ImDrawData* lastDraw = nullptr;
+
     while (isRunning) {
-        // When the system backgrounds us (PS button), it owns the display.
-        // Idle WITHOUT an open ImGui frame so we never hold the GPU mid-frame:
-        // blocking inside ImGui::Begin (as the old code did) starves SceGxm and
-        // wedges the device. Skipping the whole frame keeps ImGui state balanced.
+        // Backgrounded: the system owns the display. Idle WITHOUT an open ImGui
+        // frame so we never hold the GPU mid-frame (that wedges SceGxm).
         if (paused) {
             sceKernelDelayThread(100000);
             continue;
         }
 
-        if (first) dbg_mark("S1-first-frame-pre");
-        // imgui-vita reads DisplaySize from the live GL viewport inside NewFrame
-        // and skips ALL rendering when it is 0. The current vitaGL does not keep a
-        // viewport seeded across frames, so set it every frame, right before.
-        glViewport(0, 0, 960, 544);
-        glScissor(0, 0, 960, 544);
-        ImGui_ImplVitaGL_NewFrame();
-        ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Once);
-        ImGui::SetNextWindowSize(ImVec2(960.0f, 544.0f), ImGuiCond_Once);
+        uint64_t now = sceKernelGetProcessTimeWide();
+        InputSnapshot cur = sampleInput();
+        if (cur != prev || inputActive(cur)) {
+            wake = WAKE_FRAMES;
+        }
+        prev = cur;
 
-        if (ImGui::Begin("CSpot", nullptr, WINDOW_FLAGS)) {
-            Screen *current = screen.load();
-            if (current) {
-                current->draw();
+        bool periodic = (now - last_tick) >= TICK_US;
+        bool rebuild = wake > 0 || periodic;
+
+        if (rebuild) {
+            glViewport(0, 0, 960, 544);
+            glScissor(0, 0, 960, 544);
+            ImGui_ImplVitaGL_NewFrame();
+            ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Once);
+            ImGui::SetNextWindowSize(ImVec2(960.0f, 544.0f), ImGuiCond_Once);
+            if (ImGui::Begin("psvitify", nullptr, WINDOW_FLAGS)) {
+                Screen *current = screen.load();
+                if (current) {
+                    current->draw();
+                }
+                ImGui::End();
             }
-
-            // ImGui::SetNextWindowPos(ImVec2(650, 20), ImGuiCond_FirstUseEver);
-            // bool show = true;
-            // ImGui::ShowDemoWindow(&show);
-
-            ImGui::End();
-        }
-
-        ImGui::Render();
-        if (first) {
-            ImGuiIO& dio = ImGui::GetIO();
-            ImDrawData* dd = ImGui::GetDrawData();
-            char b[96];
-            snprintf(b, sizeof b, "DBG disp=%.0fx%.0f vtx=%d cmds=%d",
-                     dio.DisplaySize.x, dio.DisplaySize.y,
-                     dd ? dd->TotalVtxCount : -1, dd ? dd->CmdListsCount : -1);
-            dbg_mark(b);
-        }
-        // DIAGNOSTIC + likely fix: the loop never cleared the framebuffer. A
-        // distinctive clear color tells us whether the display surface is live
-        // (blue shows) or whether swaps never reach the screen (still spinner).
-        glClearColor(0.0f, 0.0f, 0.4f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        ImGui_ImplVitaGL_RenderDrawData(ImGui::GetDrawData());
-        if (first) dbg_mark("S3-pre-swap");
-        vglSwapBuffers(GL_FALSE);
-        if (first) { dbg_mark("S4-first-swap-done"); first = false; }
-
-        // Render-loop heartbeat: confirms whether frames keep flowing past the
-        // first swap (loop alive = display/presentation issue) or stall (a later
-        // frame wedges the GPU). Frequent early, then every 60 frames.
-        fcount++;
-        if (fcount <= 6 || (fcount % 60) == 0) {
-            char b[24];
-            snprintf(b, sizeof b, "F%lu", fcount);
-            dbg_mark(b);
+            ImGui::Render();
+            lastDraw = ImGui::GetDrawData();
+            glClearColor(0.07f, 0.07f, 0.07f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            ImGui_ImplVitaGL_RenderDrawData(lastDraw);
+            vglSwapBuffers(GL_FALSE);
+            last_present = now;
+            if (periodic) last_tick = now;
+            if (wake > 0) wake--;
+        } else if (lastDraw && (now - last_present) >= IDLE_PRESENT_US) {
+            // Static UI: skip the costly NewFrame + UI build, just re-present the
+            // cached draw data so the framebuffer stays live at low GPU cost.
+            glViewport(0, 0, 960, 544);
+            glScissor(0, 0, 960, 544);
+            glClearColor(0.07f, 0.07f, 0.07f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            ImGui_ImplVitaGL_RenderDrawData(lastDraw);
+            vglSwapBuffers(GL_FALSE);
+            last_present = now;
+        } else {
+            uint64_t nap = MAX_NAP_US;
+            uint64_t until_tick = last_tick + TICK_US - now;
+            uint64_t until_present = last_present + IDLE_PRESENT_US - now;
+            if (static_cast<int64_t>(until_tick) > 0 && until_tick < nap) nap = until_tick;
+            if (static_cast<int64_t>(until_present) > 0 && until_present < nap) nap = until_present;
+            sceKernelDelayThread(static_cast<SceUInt32>(nap));
         }
     }
 
-    dbg_mark("S5-loop-exit");
-    // ImGui_ImplVitaGL_Shutdown();
     ImGui::DestroyContext();
-    // vglEnd() was removed from vitaGL; the process exits right after anyway.
 }
 
 GUI::~GUI() {

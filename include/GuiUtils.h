@@ -9,7 +9,8 @@
 #define TEXT_INPUT_BACKGROUND         IM_COL32(20, 20, 20, 255)
 #define TEXT_INPUT_BACKGROUND_HOVERED IM_COL32(20, 20, 20, 255)
 #define PLAY_BUTTON_BACKGROUND        IM_COL32(255, 255, 255, 255)
-#define BACKGROUND_COLOR              ImVec4(0.09f, 0.09f, 0.15f, 1.00f)
+#define SPOTIFY_GREEN                 IM_COL32(30, 215, 96, 255)   // #1ED760
+#define BACKGROUND_COLOR              ImVec4(0.07f, 0.07f, 0.07f, 1.00f)  // #121212
 #define WINDOW_FLAGS                  (ImGuiWindowFlags_NoTitleBar      \
                                      | ImGuiWindowFlags_NoMove          \
                                      | ImGuiWindowFlags_NoResize        \

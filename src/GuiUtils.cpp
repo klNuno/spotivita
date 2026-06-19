@@ -81,8 +81,7 @@ ImFont* AddDefaultFont(float pixel_size ) {
         0,
     };
 
-    ImFont *font = io.Fonts->AddFontFromFileTTF("ProggyVector.ttf", pixel_size, NULL, ranges);
-    // ImFont *font = io.Fonts->AddFontDefault(&config);
+    ImFont *font = io.Fonts->AddFontFromFileTTF("PlusJakartaSans-Regular.ttf", pixel_size, NULL, ranges);
     return font;
 }
 

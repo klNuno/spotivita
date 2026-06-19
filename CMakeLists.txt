@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.10)
 
-set(VITA_APP_NAME "CSpot")
-set(VITA_TITLEID  "CSPOT0021")
-set(VITA_BG_TITLEID  "CSPOT022")
+set(VITA_APP_NAME "psvitify")
+# New TITLEID so psvitify installs ALONGSIDE the old CSpot (CSPOT0021), not over it.
+set(VITA_TITLEID  "PSVITIFY1")
+set(VITA_BG_TITLEID  "PSVITIFY")
 set(VITA_VERSION  "01.00")
 
 if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
@@ -45,6 +46,11 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/NanoPBHelper.cpp
 # client stack on Vita (vitasdk OpenSSL is 1.0.2, too old for CryptoOpenSSL.cpp).
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/bell/CMakeLists.txt
      DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/bell)
+# bell's HTTPServer::listen() is select-based; vitasdk's select() never reports
+# the sceNet listen socket readable, so it never accept()ed and every Zeroconf
+# request hung with 0 bytes. This replacement uses a blocking accept() loop.
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/bell/HTTPServer.cpp
+     DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/bell/src)
 
 # Surgical edit to the pinned cspot CMakeLists (bell is replaced wholesale above).
 #  1) CMake >= 3.27 hard-errors on cmake_minimum_required < 3.5.
@@ -57,15 +63,6 @@ string(REPLACE "list(APPEND EXTRA_LIBS dns_sd)"
                "# list(APPEND EXTRA_LIBS dns_sd) # disabled for Vita (no Bonjour)"
                _c "${_c}")
 file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/CMakeLists.txt" "${_c}")
-
-# Defensive: bell's HTTPServer::listen() busy-loops if select() ever errors (the
-# exit() on failure is commented out). Add a small sleep so a transient select
-# failure on Vita cannot peg a core and freeze the device.
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/bell/src/HTTPServer.cpp" _c)
-string(REPLACE "perror(\"select\");"
-               "perror(\"select\"); usleep(100000);"
-               _c "${_c}")
-file(WRITE "${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/bell/src/HTTPServer.cpp" "${_c}")
 
 # add CSpot sources
 # mbedtls backend: vitasdk OpenSSL (1.0.2) lacks the 1.1+ API CryptoOpenSSL.cpp
@@ -89,6 +86,7 @@ include_directories(
 add_executable(${PROJECT_NAME}
   src/main.cpp
   src/API.cpp
+  src/Login5.cpp
   src/Utils.cpp
   src/Keyboard.cpp
   src/CliFile.cpp
@@ -148,6 +146,9 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} eboot.bin
   FILE common_data/sce_sys/icon0.png sce_sys/icon0.png
   FILE common_data/fa-solid-900.ttf fa-solid-900.ttf
   FILE common_data/icon_alpha.png icon_alpha.png
-  FILE common_data/ProggyVector.ttf ProggyVector.ttf
+  FILE common_data/PlusJakartaSans-Regular.ttf PlusJakartaSans-Regular.ttf
+  FILE common_data/PlusJakartaSans-Medium.ttf PlusJakartaSans-Medium.ttf
+  FILE common_data/PlusJakartaSans-Bold.ttf PlusJakartaSans-Bold.ttf
+  FILE common_data/cacert.pem cacert.pem
   FILE common_data/cover_art.png cover_art.png
 )

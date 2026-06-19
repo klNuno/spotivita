@@ -2,112 +2,379 @@
 #include "Font.h"
 #include "Gui.h"
 #include "GuiUtils.h"
-#include <JSONObject.h>
+#include "Keyboard.h"
 #include "Utils.h"
 #include "Config.h"
+#include <JSONObject.h>
+#include <cstdio>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <string>
 
+namespace {
+
+const ImU32 COL_TRACK  = IM_COL32(83, 83, 83, 255);    // #535353
+const ImU32 COL_WHITE  = IM_COL32(255, 255, 255, 255);
+const ImU32 COL_GREENV = IM_COL32(30, 215, 96, 255);   // #1ED760
+const ImU32 COL_GREY   = IM_COL32(179, 179, 179, 255);  // #B3B3B3
+
+std::string fmtTime(int ms) {
+    if (ms < 0) ms = 0;
+    int s = ms / 1000;
+    int m = s / 60;
+    s %= 60;
+    char b[16];
+    snprintf(b, sizeof(b), "%d:%02d", m, s);
+    return std::string(b);
+}
+
+// Touch/mouse horizontal bar. Draws a track + fill (+ optional knob) and returns
+// true while held, writing the live held fraction (0..1) to *outFrac. Commit is
+// left to the caller (on the held->released transition) so a drag shows live and
+// the seek/volume action only fires once, on release.
+bool barControl(const char* id, float value, ImVec2 size,
+                ImU32 fill, bool knob, float* outFrac) {
+    ImGuiIO& io = ImGui::GetIO();
+    ImGui::PushID(id);
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("bar", size);
+    bool held = ImGui::IsItemActive();
+    float frac = value;
+    if (held) {
+        frac = (io.MousePos.x - p.x) / size.x;
+        if (frac < 0.0f) frac = 0.0f;
+        if (frac > 1.0f) frac = 1.0f;
+        *outFrac = frac;
+    }
+    if (frac < 0.0f) frac = 0.0f;
+    if (frac > 1.0f) frac = 1.0f;
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    float cy = p.y + size.y * 0.5f;
+    float h = 5.0f;
+    dl->AddRectFilled(ImVec2(p.x, cy - h * 0.5f),
+                      ImVec2(p.x + size.x, cy + h * 0.5f), COL_TRACK, h * 0.5f);
+    dl->AddRectFilled(ImVec2(p.x, cy - h * 0.5f),
+                      ImVec2(p.x + size.x * frac, cy + h * 0.5f), fill, h * 0.5f);
+    if (knob) {
+        dl->AddCircleFilled(ImVec2(p.x + size.x * frac, cy), 8.0f, fill);
+    }
+    ImGui::PopID();
+    return held;
+}
+
+}  // namespace
 
 PlaybackScreen::PlaybackScreen(GUI *gui) : Screen(gui) {
-    LoadTextureFromFile("app0:cover_art.png", &cover_art_tex, &cover_art_width, &cover_art_height);
-    name = "Track name";
-    artist = "Artist";
+    LoadTextureFromFile("app0:cover_art.png", &placeholder_tex, &cover_art_width, &cover_art_height);
+    cover_art_tex = placeholder_tex;
 }
 
-void PlaybackScreen::setPause(bool _isPaused) {
-    isPaused = _isPaused;
-}
-void PlaybackScreen::setTrack(std::string _name, std::string _album, std::string _artist, std::string _imageUrl) {
-    name = _name;
-    album = _album;
-    artist = _artist;
-    if (imageUrl != _imageUrl) {
-        imageUrl = _imageUrl;
-        setCoverArt(imageUrl);
+PlaybackScreen::~PlaybackScreen() {
+    if (cover_art_tex != placeholder_tex && cover_art_tex != 0) {
+        glDeleteTextures(1, &cover_art_tex);
+    }
+    if (placeholder_tex != 0) {
+        glDeleteTextures(1, &placeholder_tex);
     }
 }
 
+// Runs on the GUI thread (texture creation must not happen on the cspot worker).
 void PlaybackScreen::setCoverArt(std::string url) {
+    GLuint tex = 0;
+    int w = 0, h = 0;
+    bool ok = false;
+
     if (is_cover_cached(url)) {
-        CSPOT_LOG(info, "Load cached cover art");
-        LoadTextureFromFile(cover_art_path(url).c_str(), &cover_art_tex, &cover_art_width, &cover_art_height);
+        ok = LoadTextureFromFile(cover_art_path(url).c_str(), &tex, &w, &h);
     } else {
-        CSPOT_LOG(info, "Download cover art");
-        cover_art_png_len = download(url.c_str(), &cover_art_png);
-        if (cover_art_png_len > 0) {
-            LoadTextureFromMemory(cover_art_png, cover_art_png_len,
-                                  &cover_art_tex, &cover_art_width, &cover_art_height);
-            cache_cover_art(url, cover_art_png, cover_art_png_len);
-            free(cover_art_png);
-            cover_art_png = NULL;
+        uint8_t* png = NULL;
+        int len = download(url.c_str(), &png);
+        if (len > 0 && png != NULL) {
+            ok = LoadTextureFromMemory(png, len, &tex, &w, &h);
+            if (ok) {
+                cache_cover_art(url, png, len);
+            }
         }
+        if (png != NULL) {
+            free(png);
+        }
+    }
+
+    if (ok) {
+        if (cover_art_tex != placeholder_tex && cover_art_tex != 0) {
+            glDeleteTextures(1, &cover_art_tex);
+        }
+        cover_art_tex = tex;
+        cover_art_width = w;
+        cover_art_height = h;
+    } else if (tex != 0) {
+        glDeleteTextures(1, &tex);
     }
 }
 
-void PlaybackScreen::drawPlayer() {
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(30.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.00f, 0.00f));
-    ImGui::Dummy(ImVec2(0.0f, 28.0f));
+void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
+    float paneW = ImGui::GetContentRegionAvail().x;
+    float coverSz = paneW - 80.0f;
+    if (coverSz > 240.0f) coverSz = 240.0f;
+    if (coverSz < 120.0f) coverSz = 120.0f;
 
-    // Cover art
-    auto avail2 = ImGui::GetContentRegionAvail().x;
-    ImGui::SetCursorPosX((avail2 - 256) * 0.5f);
-    ImGui::Image((void*)(intptr_t)cover_art_tex, ImVec2(256, 256));
+    ImGui::Dummy(ImVec2(0.0f, 16.0f));
+    ImGui::SetCursorPosX((paneW - coverSz) * 0.5f);
+    ImGui::Image((void*)(intptr_t)cover_art_tex, ImVec2(coverSz, coverSz));
 
-    ImGui::Dummy(ImVec2(0.0f, 20.0f));
+    ImGui::Dummy(ImVec2(0.0f, 16.0f));
 
-    // Buttons
-    ImGuiStyle& style = ImGui::GetStyle();
-    float width = 0.0f;
-    width += 100.0f;
-    width += style.ItemSpacing.x;
-    width += 100.0f;
-    width += style.ItemSpacing.x;
-    width += 100.0f;
-    AlignForWidth(width);
-
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 50.0f);
-
-    // Backward button
-    ImGui::PushFont(gui->icon_font);
-    if (StyleButton(ICON_FA_STEP_BACKWARD,  ImVec2(100.0f, 100.0f))) {
-        if (gui->cspot_started) {
-            gui->prevCallback();
-        }
-    }
+    ImGui::PushFont(gui->font_bold);
+    TextCentered(snap.name);
     ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0.0f, 2.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text, COL_GREY);
+    TextCentered(snap.artist.empty() ? snap.album : snap.artist);
+    ImGui::PopStyleColor();
 
+    ImGui::Dummy(ImVec2(0.0f, 14.0f));
+
+    // Scrubber (position interpolated locally; seek committed on release).
+    float barW = paneW - 32.0f;
+    float frac = (snap.durationMs > 0) ? static_cast<float>(snap.positionMs) / snap.durationMs : 0.0f;
+    if (scrubbing) frac = scrubFrac;
+    float held = 0.0f;
+    ImGui::SetCursorPosX(16.0f);
+    bool nowHeld = barControl("scrub", frac, ImVec2(barW, 20.0f), COL_WHITE, true, &held);
+    if (nowHeld) {
+        scrubbing = true;
+        scrubFrac = held;
+    } else if (scrubbing) {
+        scrubbing = false;
+        int ms = static_cast<int>(scrubFrac * snap.durationMs);
+        if (ms < 0) ms = 0;
+        gui->player.setPosition(ms);
+        gui->api.seek(static_cast<uint32_t>(ms));
+    }
+
+    int shownMs = scrubbing ? static_cast<int>(scrubFrac * snap.durationMs) : snap.positionMs;
+    std::string left = fmtTime(shownMs);
+    std::string right = fmtTime(snap.durationMs);
+    ImGui::PushFont(gui->log_font);
+    ImGui::SetCursorPosX(16.0f);
+    ImGui::TextUnformatted(left.c_str());
     ImGui::SameLine();
-
-    // Play pause button
-    ImGui::PushFont(gui->playback_icon_font);
-    const char *playback_icon = isPaused ? ICON_FA_PLAY_CIRCLE "###playpause" : ICON_FA_PAUSE_CIRCLE "###playpause"; //NOLINT
-    if (StyleButton(playback_icon, ImVec2(100.0f, 100.0f))) {
-        if (gui->cspot_started) {
-            gui->playToggleCallback();
-        }
-    }
+    float rw = ImGui::CalcTextSize(right.c_str()).x;
+    ImGui::SetCursorPosX(16.0f + barW - rw);
+    ImGui::TextUnformatted(right.c_str());
     ImGui::PopFont();
-
-    ImGui::SameLine();
-
-    // Forward button
-    ImGui::PushFont(gui->icon_font);
-    if (StyleButton(ICON_FA_STEP_FORWARD, ImVec2(100.0f, 100.0f))) {
-        if (gui->cspot_started) {
-            gui->nextCallback();
-        }
-    }
-    ImGui::PopFont();
-
-    ImGui::PopStyleVar();  // ImGuiStyleVar_ItemSpacing
-    ImGui::PopStyleVar();  // ImGuiStyleVar_FrameRounding
-    ImGui::PopStyleVar();  // ImGuiStyleVar_ItemSpacing
 
     ImGui::Dummy(ImVec2(0.0f, 12.0f));
 
-    TextCentered(name);
-    ImGui::Dummy(ImVec2(0.0f, 5.0f));
-    TextCentered(artist);
+    // Transport (all 84x84 so SameLine aligns the icons cleanly).
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(24.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 50.0f);
+    AlignForWidth(84.0f * 3.0f + 24.0f * 2.0f);
+
+    ImGui::PushFont(gui->icon_font);
+    if (StyleButton(ICON_FA_STEP_BACKWARD, ImVec2(84.0f, 84.0f))) {
+        if (gui->cspot_started) gui->prevCallback();
+    }
+    ImGui::PopFont();
+    ImGui::SameLine();
+
+    ImGui::PushFont(gui->playback_icon_font);
+    const char* playIcon = snap.paused ? ICON_FA_PLAY_CIRCLE "###pp" : ICON_FA_PAUSE_CIRCLE "###pp";  // NOLINT
+    if (StyleButton(playIcon, ImVec2(84.0f, 84.0f))) {
+        if (gui->cspot_started) gui->playToggleCallback();
+    }
+    ImGui::PopFont();
+    ImGui::SameLine();
+
+    ImGui::PushFont(gui->icon_font);
+    if (StyleButton(ICON_FA_STEP_FORWARD, ImVec2(84.0f, 84.0f))) {
+        if (gui->cspot_started) gui->nextCallback();
+    }
+    ImGui::PopFont();
+
+    ImGui::PopStyleVar(2);
+
+    ImGui::Dummy(ImVec2(0.0f, 12.0f));
+
+    // Volume (committed to cspot on release).
+    float volFrac = snap.volume / 65535.0f;
+    if (volSliding) volFrac = volSlideFrac;
+    float volHeld = 0.0f;
+    ImGui::SetCursorPosX(16.0f);
+    bool volNow = barControl("vol", volFrac, ImVec2(barW, 18.0f), COL_GREENV, false, &volHeld);
+    if (volNow) {
+        volSliding = true;
+        volSlideFrac = volHeld;
+    } else if (volSliding) {
+        volSliding = false;
+        int v = static_cast<int>(volSlideFrac * 65535.0f);
+        gui->player.setVolume(v);
+        if (gui->cspot_started && gui->volumeCallback) {
+            gui->volumeCallback(v);
+        }
+    }
+}
+
+void PlaybackScreen::drawBrowse() {
+    float avail = ImGui::GetContentRegionAvail().x;
+
+    switch (tab) {
+        case Tab::LIBRARY: {
+            ImGui::PushFont(gui->font_bold);
+            ImGui::TextUnformatted("Your Library");
+            ImGui::PopFont();
+            ImGui::Dummy(ImVec2(0.0f, 6.0f));
+
+            if (!playlistsRequested && gui->cspot_started) {
+                playlistsRequested = true;
+                getPlaylists();
+            }
+            if (playlists.empty()) {
+                ImGui::PushStyleColor(ImGuiCol_Text, COL_GREY);
+                ImGui::TextUnformatted(gui->cspot_started ? "No playlists." : "Connecting...");
+                ImGui::PopStyleColor();
+            }
+
+            for (uint16_t i = 0; i < playlists.size(); i++) {
+                if (ImGui::TreeNode((void*)(intptr_t)i, "%s", playlists[i].name.c_str())) {
+                    if (!playlists[i].tracks_loaded) {
+                        getTracks(i);
+                    }
+                    if (ImGui::Button("Play")) {
+                        gui->activateDevice();
+                        gui->api.play_by_uri(playlists[i].uri, 0, 0);
+                    }
+                    for (uint32_t t = 0; t < playlists[i].tracks.size(); t++) {
+                        std::string lbl = playlists[i].tracks[t] + "##" +
+                                          std::to_string(i) + "_" + std::to_string(t);
+                        if (ImGui::Button(lbl.c_str())) {
+                            gui->activateDevice();
+                            gui->api.play_by_uri(playlists[i].uri, t, 0);
+                        }
+                    }
+                    ImGui::TreePop();
+                }
+            }
+            break;
+        }
+        case Tab::SEARCH: {
+            ImGui::PushFont(gui->font_bold);
+            ImGui::TextUnformatted("Search");
+            ImGui::PopFont();
+            ImGui::Dummy(ImVec2(0.0f, 6.0f));
+
+            std::string label = searchQuery.empty() ? std::string("Tap to search Spotify...")
+                                                     : searchQuery;
+            if (ImGui::Button(label.c_str(), ImVec2(avail, 44.0f))) {
+                std::string q = Keyboard::GetText("Search Spotify");
+                if (!q.empty()) {
+                    searchQuery = q;
+                    runSearch(q);
+                }
+            }
+            ImGui::Dummy(ImVec2(0.0f, 6.0f));
+
+            for (size_t i = 0; i < searchResults.size(); i++) {
+                std::string lbl = searchResults[i].label + "##r" + std::to_string(i);
+                if (ImGui::Button(lbl.c_str(), ImVec2(avail, 0.0f))) {
+                    gui->activateDevice();
+                    gui->api.play_track(searchResults[i].uri);
+                }
+            }
+            break;
+        }
+        case Tab::LOG:
+            ImGui::PushFont(gui->log_font);
+            ImGui::TextUnformatted(getBuf()->begin());
+            ImGui::PopFont();
+            if (getScrollToBottom()) {
+                ImGui::SetScrollHere(1.0f);
+            }
+            setScrollToBottom(false);
+            break;
+        case Tab::SETTINGS:
+            ImGui::PushFont(gui->font_bold);
+            ImGui::TextUnformatted("Settings");
+            ImGui::PopFont();
+            ImGui::Dummy(ImVec2(0.0f, 6.0f));
+            if (ImGui::Button("Refresh playlists", ImVec2(avail, 0.0f))) {
+                playlists.clear();
+                getPlaylists();
+            }
+            if (ImGui::Button("Logout", ImVec2(avail, 0.0f))) {
+                remove(CREDENTIALS_FILE_NAME);
+                gui->isRunning = false;
+            }
+            if (ImGui::Button("Exit", ImVec2(avail, 0.0f))) {
+                gui->isRunning = false;
+            }
+            break;
+    }
+}
+
+void PlaybackScreen::drawNav() {
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.0f);
+    ImGui::PushFont(gui->icon_font);
+
+    float bw = MENU_BUTTON_SIZE.x;
+    AlignForWidth(bw * 4.0f + ImGui::GetStyle().ItemSpacing.x * 3.0f);
+
+    if (StyleButton(ICON_FA_MUSIC, MENU_BUTTON_SIZE, tab == Tab::LIBRARY)) {
+        tab = Tab::LIBRARY;
+    }
+    ImGui::SameLine();
+    if (StyleButton(ICON_FA_SEARCH, MENU_BUTTON_SIZE, tab == Tab::SEARCH)) {
+        tab = Tab::SEARCH;
+    }
+    ImGui::SameLine();
+    if (StyleButton(ICON_FA_BOOK, MENU_BUTTON_SIZE, tab == Tab::LOG)) {
+        tab = Tab::LOG;
+    }
+    ImGui::SameLine();
+    if (StyleButton(ICON_FA_COG, MENU_BUTTON_SIZE, tab == Tab::SETTINGS)) {
+        tab = Tab::SETTINGS;
+    }
+
+    ImGui::PopFont();
+    ImGui::PopStyleVar(2);
+}
+
+void PlaybackScreen::draw() {
+    // One coherent snapshot per frame. Load the cover here (GUI thread) when the
+    // URL changes -- texture creation must not run on the cspot worker thread.
+    PlayerModel::Snapshot snap = gui->player.snapshot();
+    if (snap.imageUrl != loadedCoverUrl) {
+        loadedCoverUrl = snap.imageUrl;
+        if (!snap.imageUrl.empty()) {
+            setCoverArt(snap.imageUrl);
+        }
+    }
+
+    float fullW = ImGui::GetContentRegionAvail().x;
+    float leftW = fullW * 0.46f;
+
+    ImGui::BeginChild("nowplaying", ImVec2(leftW, 0.0f), false, ImGuiWindowFlags_NavFlattened);
+    drawNowPlaying(snap);
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+
+    ImGui::BeginChild("right", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_NavFlattened);
+    {
+        float navH = 64.0f;
+        ImGui::BeginChild("browse", ImVec2(0.0f, ImGui::GetContentRegionAvail().y - navH),
+                          false, ImGuiWindowFlags_NavFlattened);
+        drawBrowse();
+        ImGui::EndChild();
+
+        ImGui::BeginChild("nav", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_NavFlattened);
+        drawNav();
+        ImGui::EndChild();
+    }
+    ImGui::EndChild();
 }
 
 void PlaybackScreen::getTracks(uint16_t index) {
@@ -115,6 +382,7 @@ void PlaybackScreen::getTracks(uint16_t index) {
     std::string uri = playlists[index].uri;
 
     if (!uri.starts_with(SPOTIFY_PLAYLIST_HEADER)) {
+        playlists[index].tracks_loaded = true;
         return;
     }
     uri.erase(0, strlen(SPOTIFY_PLAYLIST_HEADER));
@@ -126,7 +394,7 @@ void PlaybackScreen::getTracks(uint16_t index) {
     while (next) {
         uint8_t *json_data;
         size_t json_len = gui->api.get_playlist_items(&json_data, uri, SPOTIFY_PLAYLIST_FIELDS,
-                                                                    SPOTIFY_TRACK_FETCH_CHUNK_SIZE, pos);
+                                                       SPOTIFY_TRACK_FETCH_CHUNK_SIZE, pos);
 
         if (json_len <= 0) {
             CSPOT_LOG(error, "error requesting songs from playlist");
@@ -151,7 +419,6 @@ void PlaybackScreen::getTracks(uint16_t index) {
             cJSON *item = cJSON_GetArrayItem(json_items, i);
             cJSON *track = cJSON_GetObjectItem(item, "track");
             cJSON *trackName = cJSON_GetObjectItem(track, "name");
-            // track can be null (episodes/unavailable items) and name may be missing
             if (cJSON_IsString(trackName) && trackName->valuestring != NULL) {
                 playlists[index].tracks.push_back(std::string(trackName->valuestring));
             }
@@ -175,7 +442,8 @@ void PlaybackScreen::getPlaylists() {
 
     while (next) {
         uint8_t *json_data;
-        size_t json_len = gui->api.get_current_users_playlists(&json_data, SPOTIFY_PLAYLIST_FETCH_CHUNK_SIZE, pos);
+        size_t json_len = gui->api.get_current_users_playlists(&json_data,
+                                                               SPOTIFY_PLAYLIST_FETCH_CHUNK_SIZE, pos);
 
         if (json_len <= 0) {
             CSPOT_LOG(error, "error requesting playlists");
@@ -199,7 +467,7 @@ void PlaybackScreen::getPlaylists() {
             if (cJSON_IsString(pname) && pname->valuestring != NULL &&
                 cJSON_IsString(puri) && puri->valuestring != NULL) {
                 playlists.push_back({std::string(pname->valuestring),
-                                        std::string(puri->valuestring), {}, false});
+                                     std::string(puri->valuestring), {}, false});
             }
             pos++;
         }
@@ -212,135 +480,49 @@ void PlaybackScreen::getPlaylists() {
     CSPOT_LOG(debug, "Got %d playlists", playlists.size());
 }
 
-void PlaybackScreen::drawSubmenu() {
-    ImGui::PushStyleColor(ImGuiCol_Button, BACKGROUND_COLOR);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, BACKGROUND_COLOR);
+void PlaybackScreen::runSearch(const std::string& query) {
+    searchResults.clear();
 
-    switch (submenu) {
-        case Submenu::LOG:
-            ImGui::PushFont(gui->log_font);
-            ImGui::TextUnformatted(getBuf()->begin());
-            ImGui::PopFont();
-            if (getScrollToBottom())
-                ImGui::SetScrollHere(1.0f);
-            setScrollToBottom(false);
-            break;
-        case Submenu::PLAYLISTS:
-            for (uint16_t i = 0; i < playlists.size(); i++) {
-                if (ImGui::TreeNode((void*)(intptr_t)i, "%s", playlists[i].name.c_str())) {
-                    if (!playlists[i].tracks_loaded) {
-                        CSPOT_LOG(debug, "request track list for playlist: %s", playlists[i].name.c_str());
-                        getTracks(i);
-                    }
-
-                    // play button
-                    if (ImGui::Button("Play")) {
-                        gui->activateDevice();
-                        gui->api.play_by_uri(playlists[i].uri, 0, 0);
-                    }
-
-                    // each song in playlist
-                    for (uint32_t track_offset = 0; track_offset < playlists[i].tracks.size(); track_offset++) {
-                        if (ImGui::Button(playlists[i].tracks[track_offset].c_str())) {
-                            gui->activateDevice();
-                            gui->api.play_by_uri(playlists[i].uri, track_offset, 0);
-                        }
-                    }
-                    ImGui::TreePop();
-                }
-            }
-            break;
-        case Submenu::SETTINGS:
-            if (ImGui::Button("Refresh playlists")) {
-                playlists.clear();
-            }
-            if (ImGui::Button("Refresh tracks")) {
-                for (std::vector<Playlist>::iterator it = playlists.begin(); it != playlists.end(); ++it) {
-                    it->tracks.clear();
-                }
-            }
-            if (ImGui::Button("Exit")) {
-                gui->isRunning = false;
-            }
-            if (ImGui::Button("Logout")) {
-                gui->isRunning = false;
-                remove(CREDENTIALS_FILE_NAME);
-            }
-
-            break;
-        default:
-            break;
+    uint8_t* data = NULL;
+    int len = gui->api.search(&data, query, "track", 10);
+    if (len <= 0 || data == NULL) {
+        if (data != NULL) free(data);
+        return;
     }
 
-    ImGui::PopStyleColor();  // ImGuiCol_ButtonHovered
-    ImGui::PopStyleColor();  // ImGuiCol_Button
-}
-
-void PlaybackScreen::drawButtons() {
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(15.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 30.0f);
-
-    // Buttons
-    ImGuiStyle& style = ImGui::GetStyle();
-    float width = 0.0f;
-    width += MENU_BUTTON_SIZE.x;
-    width += style.ItemSpacing.x;
-    width += MENU_BUTTON_SIZE.x;
-    width += style.ItemSpacing.x;
-    width += MENU_BUTTON_SIZE.x;
-    width += style.ItemSpacing.x;
-    width += MENU_BUTTON_SIZE.x;
-    AlignForWidth(width);
-
-    ImGui::PushFont(gui->icon_font);
-
-    if (StyleButton(ICON_FA_BOOK, MENU_BUTTON_SIZE, submenu == Submenu::LOG)) {
-        submenu = Submenu::LOG;
+    cJSON* root = cJSON_Parse((const char *) data);
+    free(data);
+    if (root == NULL) {
+        return;
     }
-    ImGui::SameLine();
 
-    if (StyleButton(ICON_FA_MUSIC, MENU_BUTTON_SIZE, submenu == Submenu::PLAYLISTS)) {
-        if (playlists.size() == 0) {
-            getPlaylists();
+    cJSON* tracks = cJSON_GetObjectItem(root, "tracks");
+    cJSON* items = tracks ? cJSON_GetObjectItem(tracks, "items") : NULL;
+    if (items != NULL) {
+        int n = cJSON_GetArraySize(items);
+        for (int i = 0; i < n; i++) {
+            cJSON* it = cJSON_GetArrayItem(items, i);
+            cJSON* name = cJSON_GetObjectItem(it, "name");
+            cJSON* uri = cJSON_GetObjectItem(it, "uri");
+            cJSON* artists = cJSON_GetObjectItem(it, "artists");
+
+            std::string artistName;
+            if (artists != NULL && cJSON_GetArraySize(artists) > 0) {
+                cJSON* a0 = cJSON_GetArrayItem(artists, 0);
+                cJSON* an = cJSON_GetObjectItem(a0, "name");
+                if (cJSON_IsString(an) && an->valuestring != NULL) {
+                    artistName = an->valuestring;
+                }
+            }
+            if (cJSON_IsString(name) && name->valuestring != NULL &&
+                cJSON_IsString(uri) && uri->valuestring != NULL) {
+                std::string lbl = std::string(name->valuestring);
+                if (!artistName.empty()) {
+                    lbl += "  -  " + artistName;
+                }
+                searchResults.push_back({lbl, std::string(uri->valuestring)});
+            }
         }
-        submenu = Submenu::PLAYLISTS;
     }
-    ImGui::SameLine();
-
-    if (StyleButton(ICON_FA_COG, MENU_BUTTON_SIZE, submenu == Submenu::SETTINGS)) {
-        submenu = Submenu::SETTINGS;
-    }
-    ImGui::SameLine();
-
-    if (StyleButton(ICON_FA_SEARCH, MENU_BUTTON_SIZE, submenu == Submenu::SEARCH)) {
-        submenu = Submenu::SEARCH;
-    }
-
-    ImGui::PopFont();
-    ImGui::PopStyleVar();  // ImGuiStyleVar_FrameRounding
-    ImGui::PopStyleVar();  // ImGuiStyleVar_ItemSpacing
-}
-
-void PlaybackScreen::draw() {
-    ImGui::BeginChild("player", ImVec2(ImGui::GetContentRegionAvail().x * 0.5f, 0.0f),
-                      false, ImGuiWindowFlags_NavFlattened);
-    this->drawPlayer();
-    ImGui::EndChild();
-
-    ImGui::SameLine();
-
-    ImGui::BeginChild("right_panel", ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetContentRegionAvail().y),
-                      false, ImGuiWindowFlags_NavFlattened);
-    {
-        ImGui::BeginChild("submenu", ImVec2(ImGui::GetContentRegionAvail().x, ImGui::GetContentRegionAvail().y * 0.85f),
-                          false, ImGuiWindowFlags_NavFlattened);
-        this->drawSubmenu();
-        ImGui::EndChild();
-
-        ImGui::BeginChild("buttons", ImVec2(ImGui::GetContentRegionAvail().x, 0.0f),
-                          false, ImGuiWindowFlags_NavFlattened);
-        this->drawButtons();
-        ImGui::EndChild();
-    }
-    ImGui::EndChild();
+    cJSON_Delete(root);
 }

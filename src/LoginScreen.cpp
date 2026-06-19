@@ -1,5 +1,6 @@
 #include "LoginScreen.h"
 #include "Gui.h"
+#include "Utils.h"
 
 // Spotify killed username/password login in 2024, so the Vita can no longer log
 // in with typed credentials. Instead it advertises itself as a Spotify Connect
@@ -14,13 +15,17 @@ void LoginScreen::draw() {
     ImGui::Image(reinterpret_cast<void*>(logo_tex), ImVec2(logo_width, logo_height));
     ImGui::Dummy(ImVec2(0.0f, 28.0f));
 
+    ImGui::PushFont(gui->font_bold);
+    TextCentered("psvitify");
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
     TextCentered("Waiting for Spotify Connect");
     ImGui::Dummy(ImVec2(0.0f, 14.0f));
 
     TextCentered("1. Put your phone on the same Wi-Fi as the Vita");
     TextCentered("2. Open Spotify on your phone");
     TextCentered("3. Tap the Connect (devices) icon");
-    TextCentered("4. Pick \"PS Vita (CSpot)\" in the device list");
+    TextCentered("4. Pick \"psvitify\" in the device list");
 
     ImGui::Dummy(ImVec2(0.0f, 14.0f));
     TextCentered("Spotify Premium required.");

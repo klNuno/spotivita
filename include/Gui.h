@@ -8,6 +8,7 @@
 #include <string>
 #include <Logger.h>
 #include "Screen.h"
+#include "PlayerModel.h"
 
 class GUI {
  public:
@@ -22,6 +23,7 @@ class GUI {
     // real background/foreground transitions afterwards.
     std::atomic<bool> paused = false;
     ImFont *font;
+    ImFont *font_bold;
     ImFont *playback_icon_font;
     ImFont *icon_font;
     ImFont *log_font;
@@ -36,11 +38,15 @@ class GUI {
     // Spotify API
     API api;
 
+    // Shared playback state (cspot worker writes, GUI thread reads).
+    PlayerModel player;
+
     // CSpot control
     std::function<void()> nextCallback;
     std::function<void()> prevCallback;
     std::function<void()> playToggleCallback;
     std::function<void()> activateDevice;
+    std::function<void(int)> volumeCallback;  // 0..65535
 
  private:
     std::atomic<Screen*> screen{nullptr};
