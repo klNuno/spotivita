@@ -7,6 +7,8 @@
 #include <psp2/io/fcntl.h>
 #include <vitaGL.h>
 
+#include <curl/curl.h>
+
 #include <cstring>
 #include <cstdarg>
 #include <memory>
@@ -294,6 +296,11 @@ int main(void) {
     GUI gui;
 
     init_network();
+    // MUST run before any thread touches curl: curl_easy_init's lazy global
+    // init is not thread-safe, and at boot the login5 fetch (cspot thread) and
+    // the first playlist fetch (GUI thread) can race it, corrupting libcurl /
+    // OpenSSL global state.
+    curl_global_init(CURL_GLOBAL_ALL);
     dbg_mark("03-network");
 
     watch_id = sceKernelCreateThread("watchdog", (SceKernelThreadEntry) watch_dog, 0x10000100, 0x4000, 0, 0, NULL);

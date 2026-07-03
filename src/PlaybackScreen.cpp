@@ -276,7 +276,10 @@ void PlaybackScreen::drawBrowse(const PlayerModel::Snapshot& snap) {
 
     switch (tab) {
         case Tab::LIBRARY: {
-            if (!playlistsRequested && gui->cspot_started) {
+            // Gate on the token, not on cspot_started: it avoids pointless
+            // 401s AND keeps this first fetch from racing the login5 curl
+            // calls happening on the cspot thread at boot.
+            if (!playlistsRequested && gui->api.has_token()) {
                 playlistsRequested = true;
                 getPlaylists();
             }
@@ -330,7 +333,7 @@ void PlaybackScreen::drawBrowse(const PlayerModel::Snapshot& snap) {
 
                 if (playlists.empty()) {
                     ImGui::PushStyleColor(ImGuiCol_Text, COL_GREY);
-                    ImGui::TextUnformatted(gui->cspot_started ? "No playlists." : "Connecting...");
+                    ImGui::TextUnformatted(gui->api.has_token() ? "No playlists." : "Connecting...");
                     ImGui::PopStyleColor();
                 }
                 for (uint16_t i = 0; i < playlists.size(); i++) {

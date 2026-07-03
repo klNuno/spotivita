@@ -51,6 +51,12 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/bell/CMakeLists.txt
 # request hung with 0 bytes. This replacement uses a blocking accept() loop.
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/bell/HTTPServer.cpp
      DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/bell/src)
+# Shannon MAC mismatch = desynced stream cipher. Upstream logged and kept
+# reading garbage in a tight loop (starved the GUI mid-GPU-frame and wedged the
+# whole console). The patch throws so MercuryManager's existing reconnection
+# path rebuilds the session cleanly.
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/ShannonConnection.cpp
+     DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/src)
 
 # Surgical edit to the pinned cspot CMakeLists (bell is replaced wholesale above).
 #  1) CMake >= 3.27 hard-errors on cmake_minimum_required < 3.5.

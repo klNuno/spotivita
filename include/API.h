@@ -21,6 +21,7 @@ class API {
  public:
     API() {}
     void set_token(std::string _token);
+    bool has_token() const { return !token.empty(); }
     void play_by_uri(std::string uri, uint32_t offset_pos, uint32_t position_ms);
     void play_track(std::string track_uri);
     void seek(uint32_t position_ms);
