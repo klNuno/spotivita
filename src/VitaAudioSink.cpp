@@ -8,7 +8,10 @@
 #include <cstring>
 
 #define ONE_BUFFER_SIZE       4096
-#define CIRCULAR_BUFFER_SIZE  ONE_BUFFER_SIZE * 4
+// 256 KB ring (~1.5 s of 44.1 kHz stereo s16). The old 16 KB (~93 ms) underran
+// on any network or CPU hiccup, which is the audible stutter bug. RAM is cheap
+// here; a deep buffer also lets the WiFi radio duty-cycle between bursts.
+#define CIRCULAR_BUFFER_SIZE  (ONE_BUFFER_SIZE * 64)
 #define VITA_DECODE_SIZE      (ONE_BUFFER_SIZE / 4)
 
 static int port;
@@ -45,11 +48,22 @@ VitaAudioSink::VitaAudioSink() {
     buffer.emptyBuffer();
 
     sceAppMgrReleaseBgmPort();
-    sceAppMgrAcquireBgmPort();
+    int bgm = sceAppMgrAcquireBgmPort();
+    if (bgm < 0) {
+        CSPOT_LOG(error, "sceAppMgrAcquireBgmPort failed (0x%X)", bgm);
+    }
 
     port = sceAudioOutOpenPort(SCE_AUDIO_OUT_PORT_TYPE_BGM, VITA_DECODE_SIZE, 44100, SCE_AUDIO_OUT_MODE_STEREO);
+    if (port < 0) {
+        // No valid port: leave end_flag set so the feed thread exits instead of
+        // hammering sceAudioOutOutput with a negative handle.
+        CSPOT_LOG(error, "sceAudioOutOpenPort failed (0x%X)", port);
+        end_flag = 1;
+    }
 
-    threadid = sceKernelCreateThread("audio output", (SceKernelThreadEntry)feedBlocking, 0x10000100, 0x4000, 0, 0, NULL);
+    // Priority 96 (< default ~160, lower = higher on Vita): the feed thread must
+    // never be starved by the GUI or decoder, or playback audibly drops out.
+    threadid = sceKernelCreateThread("audio output", (SceKernelThreadEntry)feedBlocking, 96, 0x4000, 0, 0, NULL);
     sceKernelStartThread(threadid, 0, NULL);
 }
 

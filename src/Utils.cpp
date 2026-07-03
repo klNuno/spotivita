@@ -5,6 +5,7 @@
 #include <psp2/io/stat.h>
 #include <psp2/io/fcntl.h>
 #include <cstring>
+#include <string>
 #include <Logger.h>
 #include "Config.h"
 

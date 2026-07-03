@@ -1,5 +1,8 @@
 #include "CliFile.h"
 
+#include <cstdio>
+#include <string>
+
 CliFile::CliFile() {}
 CliFile::~CliFile() {}
 

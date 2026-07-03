@@ -1,4 +1,6 @@
+#include <cstdio>
 #include <mutex>  // NOLINT
+#include <string>
 #include "GuiUtils.h"
 #include "Keyboard.h"
 
@@ -81,7 +83,7 @@ ImFont* AddDefaultFont(float pixel_size ) {
         0,
     };
 
-    ImFont *font = io.Fonts->AddFontFromFileTTF("PlusJakartaSans-Regular.ttf", pixel_size, NULL, ranges);
+    ImFont *font = io.Fonts->AddFontFromFileTTF("app0:PlusJakartaSans-Regular.ttf", pixel_size, NULL, ranges);
     return font;
 }
 

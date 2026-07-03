@@ -41,12 +41,13 @@ class GUI {
     // Shared playback state (cspot worker writes, GUI thread reads).
     PlayerModel player;
 
-    // CSpot control
-    std::function<void()> nextCallback;
-    std::function<void()> prevCallback;
-    std::function<void()> playToggleCallback;
-    std::function<void()> activateDevice;
-    std::function<void(int)> volumeCallback;  // 0..65535
+    // CSpot control. No-op defaults so a stray call before the cspot thread has
+    // wired them is harmless instead of a bad_function_call crash.
+    std::function<void()> nextCallback = []() {};
+    std::function<void()> prevCallback = []() {};
+    std::function<void()> playToggleCallback = []() {};
+    std::function<void()> activateDevice = []() {};
+    std::function<void(int)> volumeCallback = [](int) {};  // 0..65535
 
  private:
     std::atomic<Screen*> screen{nullptr};

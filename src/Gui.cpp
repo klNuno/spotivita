@@ -1,13 +1,13 @@
 #include "Gui.h"
-#include "GuiUtils.h"
-#include "Utils.h"
-#include <Logger.h>
-#include <cstdint>
-#include <cstdio>
 #include <psp2/ctrl.h>
 #include <psp2/touch.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/processmgr.h>
+#include <cstdint>
+#include <cstdio>
+#include <Logger.h>
+#include "GuiUtils.h"
+#include "Utils.h"
 #include "Font.h"
 #include "PlaybackScreen.h"
 #include "LoginScreen.h"
@@ -20,8 +20,7 @@ namespace {
 // changes. This -- not a lighter toolkit or a slower clock -- is what makes the
 // app sip power: a static UI does ~no CPU build and ~no GPU work.
 const int WAKE_FRAMES = 4;
-const uint64_t TICK_US = 1000000;         // 1 Hz rebuild: advances elapsed time
-const uint64_t IDLE_PRESENT_US = 66000;   // ~15 fps re-present to keep FB live
+const uint64_t IDLE_FRAME_US = 100000;    // ~10 fps full rebuild when static
 const uint64_t MAX_NAP_US = 33000;        // re-probe input at >= 30 Hz
 
 struct InputSnapshot {
@@ -103,10 +102,11 @@ void applySpotifyTheme() {
 }  // namespace
 
 void GUI::init() {
-    // No MSAA: the UI is flat axis-aligned quads + font-atlas text, and ImGui
-    // does its own geometry AA, so 4X only burned fill rate and memory. (Sysapp
-    // mode silently floors NONE to 2X, which is harmless.)
-    vglInitExtended(0, 960, 544, 0x800000, SCE_GXM_MULTISAMPLE_NONE);
+    // 4X MSAA: wasteful for a flat UI, but it is the exact init the app has
+    // years of on-device proof with (incl. the patched vitaGL toolchain build).
+    // Switch to NONE only after verifying it boots on hardware -- the init path
+    // is too fragile to change blind (see the black-screen history above).
+    vglInitExtended(0, 960, 544, 0x800000, SCE_GXM_MULTISAMPLE_4X);
 
     // imgui-vita derives io.DisplaySize from the live GL viewport inside NewFrame
     // and skips all rendering when it is 0; current vitaGL doesn't seed one, so
@@ -123,7 +123,7 @@ void GUI::init() {
     log_font = AddDefaultFont(12);
 
     static const ImWchar latin[] = { 0x0020, 0x017F, 0 };
-    font_bold = io.Fonts->AddFontFromFileTTF("PlusJakartaSans-Bold.ttf", 30.0f, NULL, latin);
+    font_bold = io.Fonts->AddFontFromFileTTF("app0:PlusJakartaSans-Bold.ttf", 30.0f, NULL, latin);
 
     ImWchar playback_ranges[] = { 0xf144, 0xf144, 0xf28b, 0xf28b, 0 };
     ImWchar ranges[] = {
@@ -157,8 +157,7 @@ void GUI::start() {
 
     InputSnapshot prev = sampleInput();
     int wake = WAKE_FRAMES;
-    uint64_t last_tick = 0, last_present = 0;
-    ImDrawData* lastDraw = nullptr;
+    uint64_t last_present = 0;
 
     while (isRunning) {
         // Backgrounded: the system owns the display. Idle WITHOUT an open ImGui
@@ -175,10 +174,11 @@ void GUI::start() {
         }
         prev = cur;
 
-        bool periodic = (now - last_tick) >= TICK_US;
-        bool rebuild = wake > 0 || periodic;
-
-        if (rebuild) {
+        // Interaction: render every vsync'd frame (60 fps). Static UI: drop to
+        // ~10 fps full rebuilds. A full (cheap) rebuild instead of re-presenting
+        // cached ImDrawData keeps us correct with any imgui backend, and still
+        // kills the 60 fps busy loop that burned the battery.
+        if (wake > 0 || (now - last_present) >= IDLE_FRAME_US) {
             glViewport(0, 0, 960, 544);
             glScissor(0, 0, 960, 544);
             ImGui_ImplVitaGL_NewFrame();
@@ -192,30 +192,19 @@ void GUI::start() {
                 ImGui::End();
             }
             ImGui::Render();
-            lastDraw = ImGui::GetDrawData();
             glClearColor(0.07f, 0.07f, 0.07f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
-            ImGui_ImplVitaGL_RenderDrawData(lastDraw);
+            ImGui_ImplVitaGL_RenderDrawData(ImGui::GetDrawData());
             vglSwapBuffers(GL_FALSE);
             last_present = now;
-            if (periodic) last_tick = now;
             if (wake > 0) wake--;
-        } else if (lastDraw && (now - last_present) >= IDLE_PRESENT_US) {
-            // Static UI: skip the costly NewFrame + UI build, just re-present the
-            // cached draw data so the framebuffer stays live at low GPU cost.
-            glViewport(0, 0, 960, 544);
-            glScissor(0, 0, 960, 544);
-            glClearColor(0.07f, 0.07f, 0.07f, 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
-            ImGui_ImplVitaGL_RenderDrawData(lastDraw);
-            vglSwapBuffers(GL_FALSE);
-            last_present = now;
+            // Frame is closed: safe point for the deferred cover-art fetch
+            // (blocks this loop, but never holds the GPU mid-frame).
+            ((PlaybackScreen*) playback_screen)->processPendingCover();
         } else {
             uint64_t nap = MAX_NAP_US;
-            uint64_t until_tick = last_tick + TICK_US - now;
-            uint64_t until_present = last_present + IDLE_PRESENT_US - now;
-            if (static_cast<int64_t>(until_tick) > 0 && until_tick < nap) nap = until_tick;
-            if (static_cast<int64_t>(until_present) > 0 && until_present < nap) nap = until_present;
+            uint64_t until_frame = last_present + IDLE_FRAME_US - now;
+            if (until_frame < nap) nap = until_frame;
             sceKernelDelayThread(static_cast<SceUInt32>(nap));
         }
     }

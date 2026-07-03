@@ -1,10 +1,10 @@
 #pragma once
 
+#include <psp2/kernel/processmgr.h>
 #include <atomic>
 #include <mutex>  // NOLINT
 #include <string>
 #include <cstdint>
-#include <psp2/kernel/processmgr.h>
 
 // Observable playback state shared between the cspot worker thread (writer) and
 // the GUI thread (reader). This is the decoupling layer: the UI never touches

@@ -4,6 +4,7 @@
 #include "Config.h"
 #include <cctype>
 #include <cstdlib>
+#include <string>
 
 // Percent-encode a query string for safe use in a URL (RFC 3986 unreserved set).
 static std::string urlencode(const std::string& s) {

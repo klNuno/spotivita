@@ -4,6 +4,8 @@
 #include <psp2/kernel/processmgr.h>
 
 #include <cstring>
+#include <string>
+#include <vector>
 
 #include <Logger.h>
 #include "Crypto.h"
@@ -133,7 +135,7 @@ size_t writeCb(void *ptr, size_t sz, size_t nm, void *up) {
 
 bool httpPost(const std::string &url, const std::string &body,
               const std::vector<std::string> &headers,
-              std::vector<uint8_t> &out, long *status) {
+              std::vector<uint8_t> &out, long *status) {  // NOLINT(runtime/int): curl uses long
     CURL *h = curl_easy_init();
     if (!h) return false;
 
@@ -144,7 +146,7 @@ bool httpPost(const std::string &url, const std::string &body,
     curl_easy_setopt(h, CURLOPT_URL, url.c_str());
     curl_easy_setopt(h, CURLOPT_POST, 1L);
     curl_easy_setopt(h, CURLOPT_POSTFIELDS, body.data());
-    curl_easy_setopt(h, CURLOPT_POSTFIELDSIZE, (long)body.size());
+    curl_easy_setopt(h, CURLOPT_POSTFIELDSIZE, (long)body.size());  // NOLINT(runtime/int)
     curl_easy_setopt(h, CURLOPT_HTTPHEADER, hl);
     curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, writeCb);
     curl_easy_setopt(h, CURLOPT_WRITEDATA, &out);
@@ -154,7 +156,7 @@ bool httpPost(const std::string &url, const std::string &body,
     curl_easy_setopt(h, CURLOPT_TIMEOUT, 25L);
 
     CURLcode res = curl_easy_perform(h);
-    long code = 0;
+    long code = 0;  // NOLINT(runtime/int): curl uses long
     curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &code);
     if (status) *status = code;
 
@@ -273,7 +275,7 @@ std::string getClientToken(const std::string &clientId, const std::string &devic
     };
 
     std::vector<uint8_t> resp;
-    long status = 0;
+    long status = 0;  // NOLINT(runtime/int): curl uses long
     if (!httpPost("https://clienttoken.spotify.com/v1/clienttoken", req, headers, resp, &status)) {
         return "";
     }
@@ -361,7 +363,7 @@ std::string login5_get_access_token(const std::string &clientId, const std::stri
                                             loginContext, challengeSolutions);
 
         std::vector<uint8_t> resp;
-        long status = 0;
+        long status = 0;  // NOLINT(runtime/int): curl uses long
         if (!httpPost("https://login5.spotify.com/v3/login", req, headers, resp, &status)) {
             return "";
         }
@@ -438,7 +440,7 @@ std::string login5_get_access_token(const std::string &clientId, const std::stri
                     int32_t nanos = 0;
                     solveHashcash(crypto, loginContext, prefix, prefixLen, length, suffix, &sec, &nanos);
                     CSPOT_LOG(info, "login5: solved hashcash (len=%d) in %llds %dns", length,
-                              (long long)sec, nanos);
+                              (long long)sec, nanos);  // NOLINT(runtime/int): printf %lld cast
 
                     // Duration { seconds=1, nanos=2 }
                     std::string duration;
@@ -468,7 +470,8 @@ std::string login5_get_access_token(const std::string &clientId, const std::stri
         }
 
         if (hasError) {
-            CSPOT_LOG(error, "login5: login error code %llu", (unsigned long long)errorCode);
+            CSPOT_LOG(error, "login5: login error code %llu",
+                      (unsigned long long)errorCode);  // NOLINT(runtime/int): printf %llu cast
             return "";
         }
 

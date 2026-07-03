@@ -80,6 +80,15 @@ PlaybackScreen::~PlaybackScreen() {
     }
 }
 
+void PlaybackScreen::processPendingCover() {
+    if (pendingCoverUrl.empty()) {
+        return;
+    }
+    std::string url = pendingCoverUrl;
+    pendingCoverUrl.clear();
+    setCoverArt(url);
+}
+
 // Runs on the GUI thread (texture creation must not happen on the cspot worker).
 void PlaybackScreen::setCoverArt(std::string url) {
     GLuint tex = 0;
@@ -343,13 +352,14 @@ void PlaybackScreen::drawNav() {
 }
 
 void PlaybackScreen::draw() {
-    // One coherent snapshot per frame. Load the cover here (GUI thread) when the
-    // URL changes -- texture creation must not run on the cspot worker thread.
+    // One coherent snapshot per frame. A changed cover URL is only RECORDED
+    // here; the download + GL upload happen in processPendingCover(), outside
+    // the open ImGui frame (network mid-frame can wedge SceGxm).
     PlayerModel::Snapshot snap = gui->player.snapshot();
     if (snap.imageUrl != loadedCoverUrl) {
         loadedCoverUrl = snap.imageUrl;
         if (!snap.imageUrl.empty()) {
-            setCoverArt(snap.imageUrl);
+            pendingCoverUrl = snap.imageUrl;
         }
     }
 

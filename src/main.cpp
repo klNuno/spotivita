@@ -10,6 +10,8 @@
 #include <cstring>
 #include <cstdarg>
 #include <memory>
+#include <string>
+#include <utility>
 
 #include "Paf.h"
 #include <SpircController.h>
@@ -138,22 +140,6 @@ int start_cspot(SceSize _args, void *_argp) {
 
         spircController = std::make_shared<SpircController>(mercuryManager, blob->username, audioSink);
 
-        // Spotify retired the keymaster Mercury token endpoint (it now answers
-        // {"code":4,"errorDescription":"Invalid request"} for stored-credential
-        // sessions). Mint the Web API access token via login5 from the stored
-        // credentials instead. Player controls run through spirc and don't need
-        // the token, so flag the controller ready before the blocking fetch.
-        gui->cspot_started = true;
-        {
-            std::string accessToken = login5_get_access_token(
-                CLIENT_ID_ANDROID, DEVICE_ID, USER_AGENT, blob->username, blob->authData);
-            if (!accessToken.empty()) {
-                gui->api.set_token(accessToken);
-            } else {
-                CSPOT_LOG(error, "login5: no Web API token; in-app browsing disabled");
-            }
-        }
-
         // Feed the shared PlayerModel; the GUI thread observes it (no casts into
         // the screen, no direct cspot coupling). get_if avoids a throwing variant
         // access if an event ever carries an unexpected payload type.
@@ -220,6 +206,26 @@ int start_cspot(SceSize _args, void *_argp) {
             return spircController->subscribe();
         };
 
+        // Controls are wired: only now is it safe to let the UI call them.
+        // (cspot_started=true with unassigned std::functions = bad_function_call
+        // crash if the user taps a transport button during the login5 fetch.)
+        gui->cspot_started = true;
+
+        // Spotify retired the keymaster Mercury token endpoint (it now answers
+        // {"code":4,"errorDescription":"Invalid request"} for stored-credential
+        // sessions). Mint the Web API access token via login5 from the stored
+        // credentials instead. Player controls run through spirc and don't need
+        // the token, so this blocking fetch happens after they are wired.
+        {
+            std::string accessToken = login5_get_access_token(
+                CLIENT_ID_ANDROID, DEVICE_ID, USER_AGENT, blob->username, blob->authData);
+            if (!accessToken.empty()) {
+                gui->api.set_token(accessToken);
+            } else {
+                CSPOT_LOG(error, "login5: no Web API token; in-app browsing disabled");
+            }
+        }
+
         while (gui->isRunning) {
             mercuryManager->updateQueue();
             sceKernelDelayThread(10000);
@@ -252,7 +258,9 @@ class MenuLogger : public bell::AbstractLogger {
     void emit(char level, const std::string& filename, int line, const char* format, va_list args) {
         const char* base = filename.c_str();
         const char* slash = strrchr(base, '/');
-        if (slash) { base = slash + 1; }
+        if (slash) {
+            base = slash + 1;
+        }
         print_to_menu("%c %s:%d: ", level, base, line);
         vprint_to_menu(format, args);
         print_to_menu("\n");
@@ -313,14 +321,33 @@ int main(void) {
     file->readFile(CREDENTIALS_FILE_NAME, authData);
     bool autoLogin = false;
     if (authData.length() > 0) {
-        blob->loadJson(authData);
-        // authType 0 == AUTHENTICATION_USER_PASS is dead: Spotify removed it in
-        // 2024, so a legacy cached blob always gets AUTH_DECLINED. Ignore it and
-        // fall back to the Zeroconf flow. Zeroconf blobs persist authType 1.
-        if (blob->authType != 0) {
-            autoLogin = true;
+        // Validate BEFORE LoginBlob::loadJson: that submodule code does
+        // std::string(cJSON_GetStringValue(...)) with no null checks, so a
+        // truncated/foreign authBlob.json (the file is shared with the old
+        // CSpot install) segfaults at boot, before the first frame.
+        cJSON *root = cJSON_Parse(authData.c_str());
+        bool valid = false;
+        if (root != NULL) {
+            cJSON *u = cJSON_GetObjectItemCaseSensitive(root, "username");
+            cJSON *a = cJSON_GetObjectItemCaseSensitive(root, "authData");
+            cJSON *t = cJSON_GetObjectItemCaseSensitive(root, "authType");
+            valid = cJSON_IsString(u) && u->valuestring != NULL &&
+                    cJSON_IsString(a) && a->valuestring != NULL &&
+                    cJSON_IsNumber(t);
+            cJSON_Delete(root);
+        }
+        if (!valid) {
+            CSPOT_LOG(error, "authBlob.json invalid, falling back to Zeroconf");
         } else {
-            CSPOT_LOG(info, "Ignoring legacy user/pass credentials (no longer accepted)");
+            blob->loadJson(authData);
+            // authType 0 == AUTHENTICATION_USER_PASS is dead: Spotify removed it
+            // in 2024, so a legacy cached blob always gets AUTH_DECLINED. Ignore
+            // it and fall back to Zeroconf. Zeroconf blobs persist authType 1.
+            if (blob->authType != 0) {
+                autoLogin = true;
+            } else {
+                CSPOT_LOG(info, "Ignoring legacy user/pass credentials (no longer accepted)");
+            }
         }
     }
 

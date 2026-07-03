@@ -24,6 +24,10 @@ class PlaybackScreen: public Screen {
     explicit PlaybackScreen(GUI *gui);
     ~PlaybackScreen();
     void draw();
+    // Runs OUTSIDE the ImGui frame (called by the GUI loop after the swap):
+    // downloads + uploads a pending cover. Network inside an open frame would
+    // hold the GPU mid-frame for up to 30 s and can wedge SceGxm.
+    void processPendingCover();
 
     void getTracks(uint16_t index);
     void getPlaylists();
@@ -45,6 +49,7 @@ class PlaybackScreen: public Screen {
     int cover_art_width = 0;
     int cover_art_height = 0;
     std::string loadedCoverUrl;
+    std::string pendingCoverUrl;
 
     // Browse state
     std::vector<Playlist> playlists;

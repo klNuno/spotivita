@@ -32,7 +32,7 @@ void LoginScreen::draw() {
 }
 
 LoginScreen::LoginScreen(GUI *gui) : Screen(gui) {
-    LoadTextureFromFile("icon_alpha.png", &logo_tex, &logo_width, &logo_height);
+    LoadTextureFromFile("app0:icon_alpha.png", &logo_tex, &logo_width, &logo_height);
 }
 
 LoginScreen::~LoginScreen() {
