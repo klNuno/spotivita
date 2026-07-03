@@ -38,7 +38,7 @@ class PlaybackScreen: public Screen {
     enum class Tab { LIBRARY, SEARCH, LOG, SETTINGS };
 
     void drawNowPlaying(const PlayerModel::Snapshot& snap);
-    void drawBrowse();
+    void drawBrowse(const PlayerModel::Snapshot& snap);
     void drawNav();
 
     // Cover art. placeholder_tex is the bundled default; cover_art_tex points at
@@ -57,6 +57,12 @@ class PlaybackScreen: public Screen {
     std::vector<SearchTrack> searchResults;
     std::string searchQuery;
     Tab tab = Tab::LIBRARY;
+    int openPlaylist = -1;   // -1 = playlist list, else index into playlists
+
+    // Optimistic local mirrors of shuffle/repeat (set through the Web API;
+    // Spotify routes the change back to this device via spirc).
+    bool shuffleOn = false;
+    int repeatMode = 0;      // 0 off, 1 context, 2 track
 
     // Scrubber / volume drag state (commit on release).
     bool scrubbing = false;

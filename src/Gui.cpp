@@ -133,6 +133,9 @@ void GUI::init() {
         0xf02d, 0xf02d,  // book
         0xf002, 0xf002,  // search
         0xf001, 0xf001,  // music
+        0xf074, 0xf074,  // random (shuffle)
+        0xf01e, 0xf01e,  // redo (repeat)
+        0xf060, 0xf060,  // arrow-left (back)
         0,
     };
     icon_font = io.Fonts->AddFontFromFileTTF(FONT_ICON_FILE_NAME_FAS, 40.0f, NULL, ranges);

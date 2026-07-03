@@ -171,6 +171,37 @@ void API::seek(uint32_t position_ms) {
     if (buf) free(buf);
 }
 
+void API::set_shuffle(bool on) {
+    if (token.size() == 0) {
+        return;
+    }
+    std::string url = SPOTIFY_API_SHUFFLE_URL;
+    url += on ? "?state=true" : "?state=false";
+    url += "&device_id=";
+    url += DEVICE_ID;
+
+    uint8_t *buf = NULL;
+    Headers headers = { {"Authorization: Bearer " + token} };
+    download(url.c_str(), &buf, "PUT", "", headers);
+    if (buf) free(buf);
+}
+
+void API::set_repeat(const char *mode) {
+    if (token.size() == 0) {
+        return;
+    }
+    std::string url = SPOTIFY_API_REPEAT_URL;
+    url += "?state=";
+    url += mode;
+    url += "&device_id=";
+    url += DEVICE_ID;
+
+    uint8_t *buf = NULL;
+    Headers headers = { {"Authorization: Bearer " + token} };
+    download(url.c_str(), &buf, "PUT", "", headers);
+    if (buf) free(buf);
+}
+
 int API::search(uint8_t **buf, std::string query, std::string type, uint16_t limit) {
     if (token.size() == 0) {
         return -1;

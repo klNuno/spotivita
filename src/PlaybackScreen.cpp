@@ -18,6 +18,31 @@ const ImU32 COL_TRACK  = IM_COL32(83, 83, 83, 255);    // #535353
 const ImU32 COL_WHITE  = IM_COL32(255, 255, 255, 255);
 const ImU32 COL_GREENV = IM_COL32(30, 215, 96, 255);   // #1ED760
 const ImU32 COL_GREY   = IM_COL32(179, 179, 179, 255);  // #B3B3B3
+const ImU32 COL_CLEAR  = IM_COL32(0, 0, 0, 0);
+
+// Flat icon button with explicit glyph/background colors (StyleButton's
+// active/inactive palette does not fit the Spotify transport row).
+bool iconButton(const char* label, ImVec2 size, ImU32 fg, ImU32 bg) {
+    ImGui::PushStyleColor(ImGuiCol_Button, bg);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, bg);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, bg);
+    ImGui::PushStyleColor(ImGuiCol_Text, fg);
+    bool r = ImGui::Button(label, size);
+    ImGui::PopStyleColor(4);
+    return r;
+}
+
+// Full-width, left-aligned list row (Spotify list style).
+bool listRow(const char* label, float width, ImU32 fg, float height = 48.0f) {
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_Button, COL_CLEAR);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(40, 40, 40, 255));
+    ImGui::PushStyleColor(ImGuiCol_Text, fg);
+    bool r = ImGui::Button(label, ImVec2(width, height));
+    ImGui::PopStyleColor(3);
+    ImGui::PopStyleVar();
+    return r;
+}
 
 std::string fmtTime(int ms) {
     if (ms < 0) ms = 0;
@@ -177,13 +202,23 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
 
     ImGui::Dummy(ImVec2(0.0f, 12.0f));
 
-    // Transport (all 84x84 so SameLine aligns the icons cleanly).
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(24.0f, 0.0f));
+    // Transport, Spotify order: shuffle / prev / play / next / repeat.
+    // Uniform 84 px height keeps the row aligned; widths vary.
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 0.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 50.0f);
-    AlignForWidth(84.0f * 3.0f + 24.0f * 2.0f);
+    AlignForWidth(56.0f + 72.0f + 84.0f + 72.0f + 56.0f + 10.0f * 4.0f);
 
     ImGui::PushFont(gui->icon_font);
-    if (StyleButton(ICON_FA_STEP_BACKWARD, ImVec2(84.0f, 84.0f))) {
+    if (iconButton(ICON_FA_RANDOM "##shuffle", ImVec2(56.0f, 84.0f),
+                   shuffleOn ? COL_GREENV : COL_GREY, COL_CLEAR)) {
+        if (gui->cspot_started) {
+            shuffleOn = !shuffleOn;
+            gui->api.set_shuffle(shuffleOn);
+        }
+    }
+    ImGui::SameLine();
+
+    if (iconButton(ICON_FA_STEP_BACKWARD "##prev", ImVec2(72.0f, 84.0f), COL_WHITE, COL_CLEAR)) {
         if (gui->cspot_started) gui->prevCallback();
     }
     ImGui::PopFont();
@@ -191,15 +226,25 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
 
     ImGui::PushFont(gui->playback_icon_font);
     const char* playIcon = snap.paused ? ICON_FA_PLAY_CIRCLE "###pp" : ICON_FA_PAUSE_CIRCLE "###pp";  // NOLINT
-    if (StyleButton(playIcon, ImVec2(84.0f, 84.0f))) {
+    if (iconButton(playIcon, ImVec2(84.0f, 84.0f), COL_WHITE, COL_CLEAR)) {
         if (gui->cspot_started) gui->playToggleCallback();
     }
     ImGui::PopFont();
     ImGui::SameLine();
 
     ImGui::PushFont(gui->icon_font);
-    if (StyleButton(ICON_FA_STEP_FORWARD, ImVec2(84.0f, 84.0f))) {
+    if (iconButton(ICON_FA_STEP_FORWARD "##next", ImVec2(72.0f, 84.0f), COL_WHITE, COL_CLEAR)) {
         if (gui->cspot_started) gui->nextCallback();
+    }
+    ImGui::SameLine();
+
+    if (iconButton(ICON_FA_REDO "##repeat", ImVec2(56.0f, 84.0f),
+                   repeatMode != 0 ? COL_GREENV : COL_GREY, COL_CLEAR)) {
+        if (gui->cspot_started) {
+            repeatMode = (repeatMode + 1) % 3;
+            static const char* kModes[] = { "off", "context", "track" };
+            gui->api.set_repeat(kModes[repeatMode]);
+        }
     }
     ImGui::PopFont();
 
@@ -226,44 +271,73 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
     }
 }
 
-void PlaybackScreen::drawBrowse() {
+void PlaybackScreen::drawBrowse(const PlayerModel::Snapshot& snap) {
     float avail = ImGui::GetContentRegionAvail().x;
 
     switch (tab) {
         case Tab::LIBRARY: {
-            ImGui::PushFont(gui->font_bold);
-            ImGui::TextUnformatted("Your Library");
-            ImGui::PopFont();
-            ImGui::Dummy(ImVec2(0.0f, 6.0f));
-
             if (!playlistsRequested && gui->cspot_started) {
                 playlistsRequested = true;
                 getPlaylists();
             }
-            if (playlists.empty()) {
-                ImGui::PushStyleColor(ImGuiCol_Text, COL_GREY);
-                ImGui::TextUnformatted(gui->cspot_started ? "No playlists." : "Connecting...");
-                ImGui::PopStyleColor();
-            }
 
-            for (uint16_t i = 0; i < playlists.size(); i++) {
-                if (ImGui::TreeNode((void*)(intptr_t)i, "%s", playlists[i].name.c_str())) {
-                    if (!playlists[i].tracks_loaded) {
-                        getTracks(i);
-                    }
-                    if (ImGui::Button("Play")) {
+            if (openPlaylist >= 0 && openPlaylist < static_cast<int>(playlists.size())) {
+                // Track view of one playlist, with a back row on top.
+                Playlist& pl = playlists[openPlaylist];
+                ImGui::PushFont(gui->icon_font);
+                bool back = iconButton(ICON_FA_ARROW_LEFT "##back", ImVec2(56.0f, 48.0f),
+                                       COL_WHITE, COL_CLEAR);
+                ImGui::PopFont();
+                ImGui::SameLine();
+                ImGui::PushFont(gui->font_bold);
+                ImGui::TextUnformatted(pl.name.c_str());
+                ImGui::PopFont();
+                if (back) {
+                    openPlaylist = -1;
+                    break;
+                }
+                ImGui::Dummy(ImVec2(0.0f, 4.0f));
+
+                ImGui::PushStyleColor(ImGuiCol_Button, COL_GREENV);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, COL_GREENV);
+                ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(18, 18, 18, 255));
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 22.0f);
+                if (ImGui::Button("Play", ImVec2(120.0f, 44.0f))) {
+                    gui->activateDevice();
+                    gui->api.play_by_uri(pl.uri, 0, 0);
+                }
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor(3);
+                ImGui::Dummy(ImVec2(0.0f, 4.0f));
+
+                if (!pl.tracks_loaded) {
+                    getTracks(openPlaylist);
+                }
+                for (uint32_t t = 0; t < pl.tracks.size(); t++) {
+                    std::string lbl = pl.tracks[t] + "##t" + std::to_string(t);
+                    // Currently playing track is tinted Spotify green.
+                    ImU32 fg = (pl.tracks[t] == snap.name) ? COL_GREENV : COL_WHITE;
+                    if (listRow(lbl.c_str(), avail, fg)) {
                         gui->activateDevice();
-                        gui->api.play_by_uri(playlists[i].uri, 0, 0);
+                        gui->api.play_by_uri(pl.uri, t, 0);
                     }
-                    for (uint32_t t = 0; t < playlists[i].tracks.size(); t++) {
-                        std::string lbl = playlists[i].tracks[t] + "##" +
-                                          std::to_string(i) + "_" + std::to_string(t);
-                        if (ImGui::Button(lbl.c_str())) {
-                            gui->activateDevice();
-                            gui->api.play_by_uri(playlists[i].uri, t, 0);
-                        }
+                }
+            } else {
+                ImGui::PushFont(gui->font_bold);
+                ImGui::TextUnformatted("Your Library");
+                ImGui::PopFont();
+                ImGui::Dummy(ImVec2(0.0f, 6.0f));
+
+                if (playlists.empty()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, COL_GREY);
+                    ImGui::TextUnformatted(gui->cspot_started ? "No playlists." : "Connecting...");
+                    ImGui::PopStyleColor();
+                }
+                for (uint16_t i = 0; i < playlists.size(); i++) {
+                    std::string lbl = playlists[i].name + "##p" + std::to_string(i);
+                    if (listRow(lbl.c_str(), avail, COL_WHITE)) {
+                        openPlaylist = i;
                     }
-                    ImGui::TreePop();
                 }
             }
             break;
@@ -274,6 +348,7 @@ void PlaybackScreen::drawBrowse() {
             ImGui::PopFont();
             ImGui::Dummy(ImVec2(0.0f, 6.0f));
 
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 22.0f);
             std::string label = searchQuery.empty() ? std::string("Tap to search Spotify...")
                                                      : searchQuery;
             if (ImGui::Button(label.c_str(), ImVec2(avail, 44.0f))) {
@@ -283,11 +358,12 @@ void PlaybackScreen::drawBrowse() {
                     runSearch(q);
                 }
             }
+            ImGui::PopStyleVar();
             ImGui::Dummy(ImVec2(0.0f, 6.0f));
 
             for (size_t i = 0; i < searchResults.size(); i++) {
                 std::string lbl = searchResults[i].label + "##r" + std::to_string(i);
-                if (ImGui::Button(lbl.c_str(), ImVec2(avail, 0.0f))) {
+                if (listRow(lbl.c_str(), avail, COL_WHITE)) {
                     gui->activateDevice();
                     gui->api.play_track(searchResults[i].uri);
                 }
@@ -377,7 +453,7 @@ void PlaybackScreen::draw() {
         float navH = 64.0f;
         ImGui::BeginChild("browse", ImVec2(0.0f, ImGui::GetContentRegionAvail().y - navH),
                           false, ImGuiWindowFlags_NavFlattened);
-        drawBrowse();
+        drawBrowse(snap);
         ImGui::EndChild();
 
         ImGui::BeginChild("nav", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_NavFlattened);

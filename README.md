@@ -7,6 +7,10 @@ in-app search, a touch scrubber and volume.
 
 Installs alongside the old CSpot (its own TITLEID), it does not replace it.
 
+Music keeps playing in the background: press the PS button and the app keeps
+streaming (BGM port + background-app attributes), including with the screen
+off. The UI stops rendering entirely while backgrounded.
+
 *Only to be used with premium spotify accounts!*
 
 ## How to install
