@@ -242,15 +242,19 @@ void solveHashcash(Crypto &c, const std::vector<uint8_t> &loginCtx,
 
 std::string getClientToken(const std::string &clientId, const std::string &deviceId,
                            const std::string &userAgent) {
-    // NativeIOSData { user_interface_idiom=0, hw_machine, system_version }
-    std::string ios;
-    pbVarintField(ios, 1, 0);                 // user_interface_idiom (phone)
-    pbStrField(ios, 3, "iPhone11,8");         // hw_machine
-    pbStrField(ios, 4, "15.1");               // system_version
+    // NativeDesktopLinuxData { system_name, system_release, system_version,
+    // hardware }. The clienttoken endpoint returns a bare HTTP 400 for the iOS
+    // and Android platform shapes but accepts the desktop shapes (verified live
+    // against clienttoken.spotify.com), so present as a Linux desktop client.
+    std::string desktop;
+    pbStrField(desktop, 1, "Linux");          // system_name
+    pbStrField(desktop, 2, "6.1.0");          // system_release
+    pbStrField(desktop, 3, "#1 SMP");         // system_version
+    pbStrField(desktop, 4, "x86_64");         // hardware
 
-    // PlatformSpecificData { ios = NativeIOSData }  (oneof field 2)
+    // PlatformSpecificData { desktop_linux = NativeDesktopLinuxData }  (field 5)
     std::string platform;
-    pbMsgField(platform, 2, ios);
+    pbMsgField(platform, 5, desktop);
 
     // ConnectivitySdkData { platform_specific_data, device_id }
     std::string conn;
@@ -259,7 +263,7 @@ std::string getClientToken(const std::string &clientId, const std::string &devic
 
     // ClientDataRequest { client_version, client_id, connectivity_sdk_data }
     std::string clientData;
-    pbStrField(clientData, 1, "8.6.84");      // client_version
+    pbStrField(clientData, 1, "1.2.31.1205.g4d59ad7c");  // desktop client_version
     pbStrField(clientData, 2, clientId);
     pbMsgField(clientData, 3, conn);          // oneof data -> connectivity_sdk_data
 
@@ -343,7 +347,12 @@ std::string login5_get_access_token(const std::string &clientId, const std::stri
         return "";
     }
 
-    std::string clientToken = getClientToken(clientId, deviceId, userAgent);
+    // Desktop UA to match the desktop client-token we mint below; the passed-in
+    // (iOS) userAgent is unused now that clienttoken rejects mobile platforms.
+    (void)userAgent;
+    const std::string ua = "Spotify/117400756 Linux/0 (X11; Linux x86_64)";
+
+    std::string clientToken = getClientToken(clientId, deviceId, ua);
     if (clientToken.empty()) return "";
 
     Crypto crypto;
@@ -351,7 +360,7 @@ std::string login5_get_access_token(const std::string &clientId, const std::stri
     std::vector<std::string> headers = {
         "Accept: application/x-protobuf",
         "Content-Type: application/x-protobuf",
-        "User-Agent: " + userAgent,
+        "User-Agent: " + ua,
         "Client-Token: " + clientToken,
     };
 

@@ -391,6 +391,7 @@ void PlaybackScreen::drawBrowse(const PlayerModel::Snapshot& snap) {
             ImGui::Dummy(ImVec2(0.0f, 6.0f));
             if (ImGui::Button("Refresh playlists", ImVec2(avail, 0.0f))) {
                 playlists.clear();
+                playlistsRequested = false;   // re-fetch on next Library visit
                 getPlaylists();
             }
             if (ImGui::Button("Logout", ImVec2(avail, 0.0f))) {
@@ -490,9 +491,11 @@ void PlaybackScreen::getTracks(uint16_t index) {
     uint32_t pos = 0;
 
     while (next) {
-        uint8_t *json_data;
-        size_t json_len = gui->api.get_playlist_items(&json_data, uri, SPOTIFY_PLAYLIST_FIELDS,
-                                                       SPOTIFY_TRACK_FETCH_CHUNK_SIZE, pos);
+        uint8_t *json_data = NULL;
+        // int, not size_t: the API returns -1 on no-token, which as an unsigned
+        // size_t passes the `<= 0` check and dereferences uninitialized json_data.
+        int json_len = gui->api.get_playlist_items(&json_data, uri, SPOTIFY_PLAYLIST_FIELDS,
+                                                    SPOTIFY_TRACK_FETCH_CHUNK_SIZE, pos);
 
         if (json_len <= 0) {
             CSPOT_LOG(error, "error requesting songs from playlist");
@@ -532,6 +535,9 @@ void PlaybackScreen::getTracks(uint16_t index) {
 }
 
 void PlaybackScreen::getPlaylists() {
+    if (!gui->api.has_token()) {
+        return;
+    }
     CSPOT_LOG(debug, "Get playlists");
     playlists.clear();
 
@@ -539,9 +545,9 @@ void PlaybackScreen::getPlaylists() {
     uint32_t pos = 0;
 
     while (next) {
-        uint8_t *json_data;
-        size_t json_len = gui->api.get_current_users_playlists(&json_data,
-                                                               SPOTIFY_PLAYLIST_FETCH_CHUNK_SIZE, pos);
+        uint8_t *json_data = NULL;
+        int json_len = gui->api.get_current_users_playlists(&json_data,
+                                                            SPOTIFY_PLAYLIST_FETCH_CHUNK_SIZE, pos);
 
         if (json_len <= 0) {
             CSPOT_LOG(error, "error requesting playlists");
