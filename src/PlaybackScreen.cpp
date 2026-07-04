@@ -150,15 +150,17 @@ void PlaybackScreen::setCoverArt(std::string url) {
 
 void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
     float paneW = ImGui::GetContentRegionAvail().x;
-    float coverSz = paneW - 80.0f;
-    if (coverSz > 240.0f) coverSz = 240.0f;
-    if (coverSz < 120.0f) coverSz = 120.0f;
+    // Sized to fit inside 544 with no scroll: cover 190 + text + scrubber +
+    // 64 px transport + volume all sum under the ~480 px child content area.
+    float coverSz = paneW - 90.0f;
+    if (coverSz > 190.0f) coverSz = 190.0f;
+    if (coverSz < 110.0f) coverSz = 110.0f;
 
-    ImGui::Dummy(ImVec2(0.0f, 16.0f));
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
     ImGui::SetCursorPosX((paneW - coverSz) * 0.5f);
     ImGui::Image((void*)(intptr_t)cover_art_tex, ImVec2(coverSz, coverSz));
 
-    ImGui::Dummy(ImVec2(0.0f, 16.0f));
+    ImGui::Dummy(ImVec2(0.0f, 12.0f));
 
     ImGui::PushFont(gui->font_bold);
     TextCentered(snap.name);
@@ -168,7 +170,7 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
     TextCentered(snap.artist.empty() ? snap.album : snap.artist);
     ImGui::PopStyleColor();
 
-    ImGui::Dummy(ImVec2(0.0f, 14.0f));
+    ImGui::Dummy(ImVec2(0.0f, 12.0f));
 
     // Scrubber (position interpolated locally; seek committed on release).
     float barW = paneW - 32.0f;
@@ -200,16 +202,16 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
     ImGui::TextUnformatted(right.c_str());
     ImGui::PopFont();
 
-    ImGui::Dummy(ImVec2(0.0f, 12.0f));
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
 
     // Transport, Spotify order: shuffle / prev / play / next / repeat.
-    // Uniform 84 px height keeps the row aligned; widths vary.
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10.0f, 0.0f));
+    // Uniform 64 px height keeps the row aligned; widths vary.
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 0.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 50.0f);
-    AlignForWidth(56.0f + 72.0f + 84.0f + 72.0f + 56.0f + 10.0f * 4.0f);
+    AlignForWidth(52.0f + 64.0f + 72.0f + 64.0f + 52.0f + 8.0f * 4.0f);
 
     ImGui::PushFont(gui->icon_font);
-    if (iconButton(ICON_FA_RANDOM "##shuffle", ImVec2(56.0f, 84.0f),
+    if (iconButton(ICON_FA_RANDOM "##shuffle", ImVec2(52.0f, 64.0f),
                    shuffleOn ? COL_GREENV : COL_GREY, COL_CLEAR)) {
         if (gui->cspot_started) {
             shuffleOn = !shuffleOn;
@@ -218,7 +220,7 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
     }
     ImGui::SameLine();
 
-    if (iconButton(ICON_FA_STEP_BACKWARD "##prev", ImVec2(72.0f, 84.0f), COL_WHITE, COL_CLEAR)) {
+    if (iconButton(ICON_FA_STEP_BACKWARD "##prev", ImVec2(64.0f, 64.0f), COL_WHITE, COL_CLEAR)) {
         if (gui->cspot_started) gui->prevCallback();
     }
     ImGui::PopFont();
@@ -226,19 +228,19 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
 
     ImGui::PushFont(gui->playback_icon_font);
     const char* playIcon = snap.paused ? ICON_FA_PLAY_CIRCLE "###pp" : ICON_FA_PAUSE_CIRCLE "###pp";  // NOLINT
-    if (iconButton(playIcon, ImVec2(84.0f, 84.0f), COL_WHITE, COL_CLEAR)) {
+    if (iconButton(playIcon, ImVec2(72.0f, 64.0f), COL_WHITE, COL_CLEAR)) {
         if (gui->cspot_started) gui->playToggleCallback();
     }
     ImGui::PopFont();
     ImGui::SameLine();
 
     ImGui::PushFont(gui->icon_font);
-    if (iconButton(ICON_FA_STEP_FORWARD "##next", ImVec2(72.0f, 84.0f), COL_WHITE, COL_CLEAR)) {
+    if (iconButton(ICON_FA_STEP_FORWARD "##next", ImVec2(64.0f, 64.0f), COL_WHITE, COL_CLEAR)) {
         if (gui->cspot_started) gui->nextCallback();
     }
     ImGui::SameLine();
 
-    if (iconButton(ICON_FA_REDO "##repeat", ImVec2(56.0f, 84.0f),
+    if (iconButton(ICON_FA_REDO "##repeat", ImVec2(52.0f, 64.0f),
                    repeatMode != 0 ? COL_GREENV : COL_GREY, COL_CLEAR)) {
         if (gui->cspot_started) {
             repeatMode = (repeatMode + 1) % 3;
@@ -250,7 +252,7 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
 
     ImGui::PopStyleVar(2);
 
-    ImGui::Dummy(ImVec2(0.0f, 12.0f));
+    ImGui::Dummy(ImVec2(0.0f, 10.0f));
 
     // Volume (committed to cspot on release).
     float volFrac = snap.volume / 65535.0f;
@@ -407,22 +409,22 @@ void PlaybackScreen::drawNav() {
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.0f);
     ImGui::PushFont(gui->icon_font);
 
-    float bw = MENU_BUTTON_SIZE.x;
-    AlignForWidth(bw * 4.0f + ImGui::GetStyle().ItemSpacing.x * 3.0f);
+    ImVec2 nb(60.0f, 60.0f);
+    AlignForWidth(nb.x * 4.0f + ImGui::GetStyle().ItemSpacing.x * 3.0f);
 
-    if (StyleButton(ICON_FA_MUSIC, MENU_BUTTON_SIZE, tab == Tab::LIBRARY)) {
+    if (StyleButton(ICON_FA_MUSIC, nb, tab == Tab::LIBRARY)) {
         tab = Tab::LIBRARY;
     }
     ImGui::SameLine();
-    if (StyleButton(ICON_FA_SEARCH, MENU_BUTTON_SIZE, tab == Tab::SEARCH)) {
+    if (StyleButton(ICON_FA_SEARCH, nb, tab == Tab::SEARCH)) {
         tab = Tab::SEARCH;
     }
     ImGui::SameLine();
-    if (StyleButton(ICON_FA_BOOK, MENU_BUTTON_SIZE, tab == Tab::LOG)) {
+    if (StyleButton(ICON_FA_BOOK, nb, tab == Tab::LOG)) {
         tab = Tab::LOG;
     }
     ImGui::SameLine();
-    if (StyleButton(ICON_FA_COG, MENU_BUTTON_SIZE, tab == Tab::SETTINGS)) {
+    if (StyleButton(ICON_FA_COG, nb, tab == Tab::SETTINGS)) {
         tab = Tab::SETTINGS;
     }
 
@@ -445,7 +447,14 @@ void PlaybackScreen::draw() {
     float fullW = ImGui::GetContentRegionAvail().x;
     float leftW = fullW * 0.46f;
 
-    ImGui::BeginChild("nowplaying", ImVec2(leftW, 0.0f), false, ImGuiWindowFlags_NavFlattened);
+    // Now-playing is fixed-size: forbid scrolling so a button press near the
+    // bottom can't auto-scroll the pane (the "interface scrolls down on
+    // actions" bug). The browse list keeps its scrollbar for long playlists.
+    const ImGuiWindowFlags kNoScroll = ImGuiWindowFlags_NavFlattened |
+                                       ImGuiWindowFlags_NoScrollbar |
+                                       ImGuiWindowFlags_NoScrollWithMouse;
+
+    ImGui::BeginChild("nowplaying", ImVec2(leftW, 0.0f), false, kNoScroll);
     drawNowPlaying(snap);
     ImGui::EndChild();
 
@@ -453,13 +462,13 @@ void PlaybackScreen::draw() {
 
     ImGui::BeginChild("right", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_NavFlattened);
     {
-        float navH = 64.0f;
+        float navH = 80.0f;
         ImGui::BeginChild("browse", ImVec2(0.0f, ImGui::GetContentRegionAvail().y - navH),
                           false, ImGuiWindowFlags_NavFlattened);
         drawBrowse(snap);
         ImGui::EndChild();
 
-        ImGui::BeginChild("nav", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_NavFlattened);
+        ImGui::BeginChild("nav", ImVec2(0.0f, 0.0f), false, kNoScroll);
         drawNav();
         ImGui::EndChild();
     }

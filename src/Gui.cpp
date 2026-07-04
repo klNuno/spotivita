@@ -139,7 +139,7 @@ void GUI::init() {
         0,
     };
     icon_font = io.Fonts->AddFontFromFileTTF(FONT_ICON_FILE_NAME_FAS, 40.0f, NULL, ranges);
-    playback_icon_font = io.Fonts->AddFontFromFileTTF(FONT_ICON_FILE_NAME_FAS, 84.0f, NULL, playback_ranges);
+    playback_icon_font = io.Fonts->AddFontFromFileTTF(FONT_ICON_FILE_NAME_FAS, 58.0f, NULL, playback_ranges);
     io.Fonts->Build();
 
     applySpotifyTheme();
