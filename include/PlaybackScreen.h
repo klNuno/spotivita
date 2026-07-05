@@ -54,6 +54,8 @@ class PlaybackScreen: public Screen {
     // Browse state
     std::vector<Playlist> playlists;
     bool playlistsRequested = false;
+    bool rateLimited = false;
+    uint64_t lastFetchUs = 0;
     std::vector<SearchTrack> searchResults;
     std::string searchQuery;
     Tab tab = Tab::LIBRARY;

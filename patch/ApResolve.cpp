@@ -84,6 +84,12 @@ std::string ApResolve::getApList()
     return jsonData;
 }
 
+// Fallback AP used when apresolve is unreachable. On Vita gethostbyname for
+// apresolve.spotify.com can fail right after a reconnect tears the socket down;
+// throwing there aborts the whole reconnect. This known-good AP lets the session
+// (re)connect directly instead of giving up.
+#define AP_FALLBACK "ap-gew1.spotify.com:4070"
+
 std::string ApResolve::fetchFirstApAddress()
 {
     if (configMan->apOverride != "")
@@ -91,42 +97,43 @@ std::string ApResolve::fetchFirstApAddress()
         return configMan->apOverride;
     }
 
-    // Fetch json body
-    auto jsonData = getApList();
-
-    // Use cJSON to get first ap address
-    auto root = cJSON_Parse(jsonData.c_str());
-    if (root == NULL)
+    try
     {
-        CSPOT_LOG(error, "apresolve: invalid JSON response");
-        throw std::runtime_error("Resolve failed");
-    }
+        // Fetch json body
+        auto jsonData = getApList();
 
-    // Spotify renamed the key from "ap_list" to "accesspoint" over time; accept both.
-    auto apList = cJSON_GetObjectItemCaseSensitive(root, "ap_list");
-    if (!cJSON_IsArray(apList))
-    {
-        apList = cJSON_GetObjectItemCaseSensitive(root, "accesspoint");
-    }
+        auto root = cJSON_Parse(jsonData.c_str());
+        if (root == NULL)
+        {
+            throw std::runtime_error("invalid JSON response");
+        }
 
-    if (!cJSON_IsArray(apList) || cJSON_GetArraySize(apList) == 0)
-    {
+        // Spotify renamed the key from "ap_list" to "accesspoint"; accept both.
+        auto apList = cJSON_GetObjectItemCaseSensitive(root, "ap_list");
+        if (!cJSON_IsArray(apList))
+        {
+            apList = cJSON_GetObjectItemCaseSensitive(root, "accesspoint");
+        }
+
+        if (!cJSON_IsArray(apList) || cJSON_GetArraySize(apList) == 0)
+        {
+            cJSON_Delete(root);
+            throw std::runtime_error("no access point in response");
+        }
+
+        auto firstAp = cJSON_GetArrayItem(apList, 0);
+        if (!cJSON_IsString(firstAp) || firstAp->valuestring == NULL)
+        {
+            cJSON_Delete(root);
+            throw std::runtime_error("malformed access point entry");
+        }
+        auto data = std::string(firstAp->valuestring);
         cJSON_Delete(root);
-        CSPOT_LOG(error, "apresolve: no access point in response (set apOverride to bypass)");
-        throw std::runtime_error("Resolve failed");
+        return data;
     }
-
-    auto firstAp = cJSON_GetArrayItem(apList, 0);
-    if (!cJSON_IsString(firstAp) || firstAp->valuestring == NULL)
+    catch (const std::exception &e)
     {
-        cJSON_Delete(root);
-        CSPOT_LOG(error, "apresolve: malformed access point entry");
-        throw std::runtime_error("Resolve failed");
+        CSPOT_LOG(error, "apresolve failed (%s), using %s", e.what(), AP_FALLBACK);
+        return AP_FALLBACK;
     }
-    auto data = std::string(firstAp->valuestring);
-
-    // release cjson memory
-    cJSON_Delete(root);
-
-    return data;
 }
