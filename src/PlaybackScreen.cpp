@@ -493,122 +493,116 @@ void PlaybackScreen::getTracks(uint16_t index) {
     uri.erase(0, strlen(SPOTIFY_PLAYLIST_HEADER));
     playlists[index].tracks.clear();
 
-    bool next = true;
-    uint32_t pos = 0;
+    // ONE request, first 50 tracks. Same shared-client rate limit as the
+    // playlist list: paginating a long playlist in a burst instantly 429s.
+    uint8_t *json_data = NULL;
+    int json_len = gui->api.get_playlist_items(&json_data, uri, SPOTIFY_PLAYLIST_FIELDS,
+                                               SPOTIFY_TRACK_FETCH_CHUNK_SIZE, 0);
 
-    while (next) {
-        uint8_t *json_data = NULL;
-        // int, not size_t: the API returns -1 on no-token, which as an unsigned
-        // size_t passes the `<= 0` check and dereferences uninitialized json_data.
-        int json_len = gui->api.get_playlist_items(&json_data, uri, SPOTIFY_PLAYLIST_FIELDS,
-                                                    SPOTIFY_TRACK_FETCH_CHUNK_SIZE, pos);
+    if (json_len <= 0) {
+        CSPOT_LOG(error, "error requesting songs from playlist");
+        if (json_data != NULL) free(json_data);
+        // Not tracks_loaded: let the user retry by reopening; a transient 429
+        // shouldn't permanently show an empty playlist.
+        return;
+    }
 
-        if (json_len <= 0) {
-            CSPOT_LOG(error, "error requesting songs from playlist");
-            playlists[index].tracks_loaded = true;
-            playlists[index].tracks.push_back("No tracks");
-            return;
-        }
-
-        cJSON *root = cJSON_Parse((const char *) json_data);
-        if (root == NULL || !cJSON_HasObjectItem(root, "items")) {
-            playlists[index].tracks_loaded = true;
-            playlists[index].tracks.push_back("No tracks");
-            cJSON_Delete(root);
-            free(json_data);
-            return;
-        }
-        cJSON *json_next = cJSON_GetObjectItem(root, "next");
-        cJSON *json_items = cJSON_GetObjectItem(root, "items");
-        uint32_t tracks_in_chunk = cJSON_GetArraySize(json_items);
-
-        for (uint32_t i = 0; i < tracks_in_chunk; i++) {
-            cJSON *item = cJSON_GetArrayItem(json_items, i);
-            cJSON *track = cJSON_GetObjectItem(item, "track");
-            cJSON *trackName = cJSON_GetObjectItem(track, "name");
-            if (cJSON_IsString(trackName) && trackName->valuestring != NULL) {
-                playlists[index].tracks.push_back(std::string(trackName->valuestring));
-            }
-            pos++;
-        }
-
-        next = !cJSON_IsNull(json_next);
+    cJSON *root = cJSON_Parse((const char *) json_data);
+    free(json_data);
+    if (root == NULL) {
+        return;
+    }
+    if (cJSON_HasObjectItem(root, "error")) {
+        rateLimited = true;
+        if (backoffStep < 8) backoffStep++;
+        backoffUntilUs = sceKernelGetProcessTimeWide() +
+                         static_cast<uint64_t>(backoffStep) * 30000000ULL;
         cJSON_Delete(root);
-        free(json_data);
+        return;
+    }
+    cJSON *json_items = cJSON_GetObjectItem(root, "items");
+    if (!cJSON_IsArray(json_items)) {
+        playlists[index].tracks_loaded = true;
+        cJSON_Delete(root);
+        return;
+    }
+    int count = cJSON_GetArraySize(json_items);
+    for (int i = 0; i < count; i++) {
+        cJSON *item = cJSON_GetArrayItem(json_items, i);
+        cJSON *track = cJSON_GetObjectItem(item, "track");
+        cJSON *trackName = cJSON_GetObjectItem(track, "name");
+        if (cJSON_IsString(trackName) && trackName->valuestring != NULL) {
+            playlists[index].tracks.push_back(std::string(trackName->valuestring));
+        }
     }
     playlists[index].tracks_loaded = true;
-    CSPOT_LOG(debug, "Got %d tracks", pos);
+    cJSON_Delete(root);
+    CSPOT_LOG(debug, "Got %d tracks", count);
 }
 
 void PlaybackScreen::getPlaylists() {
     if (!gui->api.has_token()) {
         return;
     }
-    // Cooldown: never hit the API more than once per 5 s regardless of how many
-    // times the UI asks (auto-fetch + Refresh taps). Spotify rate-limits hard,
-    // and hammering after a 429 only deepens the throttle.
+    // Spotify's rate limit is a rolling ~30 s window: retrying every few seconds
+    // never lets it drain, so a 429 sustains itself forever. Back off with a
+    // growing wait (30 s, 60 s, ... up to ~4 min) so the window can actually
+    // clear before the next attempt.
     uint64_t now = sceKernelGetProcessTimeWide();
-    if (lastFetchUs != 0 && now - lastFetchUs < 5000000) {
+    if (now < backoffUntilUs) {
         return;
     }
-    lastFetchUs = now;
 
     CSPOT_LOG(debug, "Get playlists");
-    // Build into a temporary and only swap on success, so a 429 mid-refresh
-    // does not wipe the playlists the user already had.
-    std::vector<Playlist> fresh;
-    bool next = true;
-    uint32_t pos = 0;
-
-    while (next) {
-        uint8_t *json_data = NULL;
-        int json_len = gui->api.get_current_users_playlists(&json_data,
-                                                            SPOTIFY_PLAYLIST_FETCH_CHUNK_SIZE, pos);
-
-        if (json_len <= 0) {
-            CSPOT_LOG(error, "error requesting playlists");
-            if (json_data != NULL) free(json_data);
-            return;
-        }
-
-        cJSON *root = cJSON_Parse((const char *) json_data);
-        free(json_data);
-        if (root == NULL) {
-            return;
-        }
-        if (cJSON_HasObjectItem(root, "error")) {
-            // 429 / auth error: keep the old list, flag it for the UI, retry
-            // later (the cooldown + auto-fetch guard handle the retry pacing).
-            rateLimited = true;
-            cJSON_Delete(root);
-            return;
-        }
-        if (!cJSON_HasObjectItem(root, "items")) {
-            cJSON_Delete(root);
-            return;
-        }
-        rateLimited = false;
-        cJSON *json_next = cJSON_GetObjectItem(root, "next");
-        cJSON *json_items = cJSON_GetObjectItem(root, "items");
-        uint32_t playlists_in_chunk = cJSON_GetArraySize(json_items);
-
-        for (uint32_t i = 0; i < playlists_in_chunk; i++) {
-            cJSON *item = cJSON_GetArrayItem(json_items, i);
-            cJSON *pname = cJSON_GetObjectItem(item, "name");
-            cJSON *puri = cJSON_GetObjectItem(item, "uri");
-            if (cJSON_IsString(pname) && pname->valuestring != NULL &&
-                cJSON_IsString(puri) && puri->valuestring != NULL) {
-                fresh.push_back({std::string(pname->valuestring),
-                                 std::string(puri->valuestring), {}, false});
-            }
-            pos++;
-        }
-
-        next = !cJSON_IsNull(json_next);
-        cJSON_Delete(root);
+    // ONE request, first page only (limit 50). The keymaster client_id is
+    // globally rate-limited (~1 req / 2 s, shared by every librespot user);
+    // paginating in a tight loop instantly re-triggers the 429. First 50
+    // playlists is plenty for browsing.
+    uint8_t *json_data = NULL;
+    int json_len = gui->api.get_current_users_playlists(&json_data,
+                                                        SPOTIFY_PLAYLIST_FETCH_CHUNK_SIZE, 0);
+    if (json_len <= 0) {
+        CSPOT_LOG(error, "error requesting playlists");
+        if (json_data != NULL) free(json_data);
+        return;
     }
 
+    cJSON *root = cJSON_Parse((const char *) json_data);
+    free(json_data);
+    if (root == NULL) {
+        return;
+    }
+    if (cJSON_HasObjectItem(root, "error")) {
+        // 429 / auth error: keep the old list, flag it, back off with a growing
+        // wait so we stop feeding our own throttle.
+        rateLimited = true;
+        if (backoffStep < 8) backoffStep++;
+        backoffUntilUs = now + static_cast<uint64_t>(backoffStep) * 30000000ULL;
+        cJSON_Delete(root);
+        return;
+    }
+    cJSON *json_items = cJSON_GetObjectItem(root, "items");
+    if (!cJSON_IsArray(json_items)) {
+        cJSON_Delete(root);
+        return;
+    }
+    rateLimited = false;
+    backoffStep = 0;
+
+    std::vector<Playlist> fresh;
+    int count = cJSON_GetArraySize(json_items);
+    for (int i = 0; i < count; i++) {
+        cJSON *item = cJSON_GetArrayItem(json_items, i);
+        cJSON *pname = cJSON_GetObjectItem(item, "name");
+        cJSON *puri = cJSON_GetObjectItem(item, "uri");
+        if (cJSON_IsString(pname) && pname->valuestring != NULL &&
+            cJSON_IsString(puri) && puri->valuestring != NULL) {
+            fresh.push_back({std::string(pname->valuestring),
+                             std::string(puri->valuestring), {}, false});
+        }
+    }
     playlists = std::move(fresh);
+    cJSON_Delete(root);
     CSPOT_LOG(debug, "Got %d playlists", playlists.size());
 }
 

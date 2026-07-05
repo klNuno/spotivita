@@ -4,7 +4,7 @@
 
 #define SPOTIFY_PLAYLIST_HEADER            "spotify:playlist:"
 #define SPOTIFY_TRACK_FETCH_CHUNK_SIZE     50
-#define SPOTIFY_PLAYLIST_FETCH_CHUNK_SIZE  15
+#define SPOTIFY_PLAYLIST_FETCH_CHUNK_SIZE  50
 #define SPOTIFY_PLAYLIST_FIELDS            "items(track(name,artists(name))),next"
 
 #define SPOTIFY_API_PLAY_URL               "https://api.spotify.com/v1/me/player/play"
