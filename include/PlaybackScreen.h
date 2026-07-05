@@ -33,6 +33,10 @@ class PlaybackScreen: public Screen {
     void getPlaylists();
     void runSearch(const std::string& query);
     void setCoverArt(std::string url);
+    // Executes the queued network actions. MUST be called by the GUI loop AFTER
+    // vglSwapBuffers, never inside the ImGui frame: curl blocks, and blocking
+    // mid-frame holds the GPU and wedges the whole console on slow wifi.
+    void runDeferred();
 
  private:
     enum class Tab { LIBRARY, SEARCH, LOG, SETTINGS };
@@ -57,6 +61,19 @@ class PlaybackScreen: public Screen {
     bool rateLimited = false;
     uint64_t backoffUntilUs = 0;
     int backoffStep = 0;
+
+    // Deferred network intents, set by the UI, run in runDeferred() off-frame.
+    bool wantPlaylists = false;
+    int wantTracks = -1;
+    std::string wantSearch;
+    bool wantPlay = false;
+    std::string wantPlayUri;
+    uint32_t wantPlayOffset = 0;
+    std::string wantPlayTrack;
+    int wantSeek = -1;
+    int wantShuffle = -1;
+    int wantRepeat = -1;
+    int wantVolume = -1;
     std::vector<SearchTrack> searchResults;
     std::string searchQuery;
     Tab tab = Tab::LIBRARY;

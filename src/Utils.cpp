@@ -102,8 +102,8 @@ int download(const char *url, uint8_t **return_buffer, const char *method, std::
     curl_easy_setopt(curl_handle, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
     // Never let a stalled transfer wedge the caller (cover art + API run on the
     // cspot and GUI threads); bound both connect and total time.
-    curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT, 10L);
-    curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT, 8L);
+    curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, 12L);
     curl_easy_setopt(curl_handle, CURLOPT_CUSTOMREQUEST, method);
 
     if (post_data.size() != 0) {

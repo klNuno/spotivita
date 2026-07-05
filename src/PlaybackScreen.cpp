@@ -114,6 +114,73 @@ void PlaybackScreen::processPendingCover() {
     setCoverArt(url);
 }
 
+// Off-frame executor: every blocking curl call the UI queued runs here, AFTER
+// the swap, so the GPU is never held mid-frame. One action per call keeps the
+// per-frame pause bounded to a single request.
+void PlaybackScreen::runDeferred() {
+    processPendingCover();
+
+    // User-initiated actions first (one per frame so the pause stays bounded),
+    // then the background browse fetches. This ordering matters: while playlists
+    // are rate-limited, wantPlaylists is re-set every frame, so it must not
+    // starve a play/seek the user just tapped.
+    if (wantPlay) {
+        wantPlay = false;
+        gui->activateDevice();
+        gui->api.play_by_uri(wantPlayUri, wantPlayOffset, 0);
+        return;
+    }
+    if (!wantPlayTrack.empty()) {
+        std::string u = wantPlayTrack;
+        wantPlayTrack.clear();
+        gui->activateDevice();
+        gui->api.play_track(u);
+        return;
+    }
+    if (wantSeek >= 0) {
+        int s = wantSeek;
+        wantSeek = -1;
+        gui->api.seek(static_cast<uint32_t>(s));
+        return;
+    }
+    if (wantShuffle >= 0) {
+        int s = wantShuffle;
+        wantShuffle = -1;
+        gui->api.set_shuffle(s != 0);
+        return;
+    }
+    if (wantRepeat >= 0) {
+        static const char* kModes[] = { "off", "context", "track" };
+        int r = wantRepeat;
+        wantRepeat = -1;
+        if (r >= 0 && r < 3) gui->api.set_repeat(kModes[r]);
+        return;
+    }
+    if (wantVolume >= 0) {
+        int v = wantVolume;
+        wantVolume = -1;
+        if (gui->cspot_started && gui->volumeCallback) gui->volumeCallback(v);
+        return;
+    }
+    if (!wantSearch.empty()) {
+        std::string q = wantSearch;
+        wantSearch.clear();
+        runSearch(q);
+        return;
+    }
+    if (wantTracks >= 0) {
+        int i = wantTracks;
+        wantTracks = -1;
+        if (i < static_cast<int>(playlists.size())) getTracks(static_cast<uint16_t>(i));
+        return;
+    }
+    if (wantPlaylists) {
+        wantPlaylists = false;
+        getPlaylists();
+        return;
+    }
+}
+
 // Runs on the GUI thread (texture creation must not happen on the cspot worker).
 void PlaybackScreen::setCoverArt(std::string url) {
     GLuint tex = 0;
@@ -186,8 +253,8 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
         scrubbing = false;
         int ms = static_cast<int>(scrubFrac * snap.durationMs);
         if (ms < 0) ms = 0;
-        gui->player.setPosition(ms);
-        gui->api.seek(static_cast<uint32_t>(ms));
+        gui->player.setPosition(ms);   // instant local feedback
+        wantSeek = ms;                 // Web API seek runs off-frame
     }
 
     int shownMs = scrubbing ? static_cast<int>(scrubFrac * snap.durationMs) : snap.positionMs;
@@ -215,7 +282,7 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
                    shuffleOn ? COL_GREENV : COL_GREY, COL_CLEAR)) {
         if (gui->cspot_started) {
             shuffleOn = !shuffleOn;
-            gui->api.set_shuffle(shuffleOn);
+            wantShuffle = shuffleOn ? 1 : 0;
         }
     }
     ImGui::SameLine();
@@ -244,8 +311,7 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
                    repeatMode != 0 ? COL_GREENV : COL_GREY, COL_CLEAR)) {
         if (gui->cspot_started) {
             repeatMode = (repeatMode + 1) % 3;
-            static const char* kModes[] = { "off", "context", "track" };
-            gui->api.set_repeat(kModes[repeatMode]);
+            wantRepeat = repeatMode;
         }
     }
     ImGui::PopFont();
@@ -266,10 +332,8 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
     } else if (volSliding) {
         volSliding = false;
         int v = static_cast<int>(volSlideFrac * 65535.0f);
-        gui->player.setVolume(v);
-        if (gui->cspot_started && gui->volumeCallback) {
-            gui->volumeCallback(v);
-        }
+        gui->player.setVolume(v);   // instant local feedback
+        wantVolume = v;             // pushed to cspot off-frame
     }
 }
 
@@ -286,7 +350,7 @@ void PlaybackScreen::drawBrowse(const PlayerModel::Snapshot& snap) {
             if (gui->api.has_token() && (!playlistsRequested ||
                                          (rateLimited && playlists.empty()))) {
                 playlistsRequested = true;
-                getPlaylists();
+                wantPlaylists = true;
             }
 
             if (openPlaylist >= 0 && openPlaylist < static_cast<int>(playlists.size())) {
@@ -311,23 +375,21 @@ void PlaybackScreen::drawBrowse(const PlayerModel::Snapshot& snap) {
                 ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(18, 18, 18, 255));
                 ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 22.0f);
                 if (ImGui::Button("Play", ImVec2(120.0f, 44.0f))) {
-                    gui->activateDevice();
-                    gui->api.play_by_uri(pl.uri, 0, 0);
+                    wantPlay = true; wantPlayUri = pl.uri; wantPlayOffset = 0;
                 }
                 ImGui::PopStyleVar();
                 ImGui::PopStyleColor(3);
                 ImGui::Dummy(ImVec2(0.0f, 4.0f));
 
                 if (!pl.tracks_loaded) {
-                    getTracks(openPlaylist);
+                    wantTracks = openPlaylist;
                 }
                 for (uint32_t t = 0; t < pl.tracks.size(); t++) {
                     std::string lbl = pl.tracks[t] + "##t" + std::to_string(t);
                     // Currently playing track is tinted Spotify green.
                     ImU32 fg = (pl.tracks[t] == snap.name) ? COL_GREENV : COL_WHITE;
                     if (listRow(lbl.c_str(), avail, fg)) {
-                        gui->activateDevice();
-                        gui->api.play_by_uri(pl.uri, t, 0);
+                        wantPlay = true; wantPlayUri = pl.uri; wantPlayOffset = t;
                     }
                 }
             } else {
@@ -366,7 +428,7 @@ void PlaybackScreen::drawBrowse(const PlayerModel::Snapshot& snap) {
                 std::string q = Keyboard::GetText("Search Spotify");
                 if (!q.empty()) {
                     searchQuery = q;
-                    runSearch(q);
+                    wantSearch = q;
                 }
             }
             ImGui::PopStyleVar();
@@ -375,8 +437,7 @@ void PlaybackScreen::drawBrowse(const PlayerModel::Snapshot& snap) {
             for (size_t i = 0; i < searchResults.size(); i++) {
                 std::string lbl = searchResults[i].label + "##r" + std::to_string(i);
                 if (listRow(lbl.c_str(), avail, COL_WHITE)) {
-                    gui->activateDevice();
-                    gui->api.play_track(searchResults[i].uri);
+                    wantPlayTrack = searchResults[i].uri;
                 }
             }
             break;
@@ -398,7 +459,9 @@ void PlaybackScreen::drawBrowse(const PlayerModel::Snapshot& snap) {
             if (ImGui::Button("Refresh playlists", ImVec2(avail, 0.0f))) {
                 playlists.clear();
                 playlistsRequested = false;   // re-fetch on next Library visit
-                getPlaylists();
+                backoffStep = 0;
+                backoffUntilUs = 0;
+                wantPlaylists = true;
             }
             if (ImGui::Button("Logout", ImVec2(avail, 0.0f))) {
                 remove(CREDENTIALS_FILE_NAME);
@@ -483,6 +546,11 @@ void PlaybackScreen::draw() {
 }
 
 void PlaybackScreen::getTracks(uint16_t index) {
+    // Shared rate-limit backoff (same window as getPlaylists): don't retry a
+    // 429'd track fetch every frame.
+    if (sceKernelGetProcessTimeWide() < backoffUntilUs) {
+        return;
+    }
     CSPOT_LOG(debug, "Get tracks for playlist: %d", index);
     std::string uri = playlists[index].uri;
 

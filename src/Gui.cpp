@@ -201,9 +201,11 @@ void GUI::start() {
             vglSwapBuffers(GL_FALSE);
             last_present = now;
             if (wake > 0) wake--;
-            // Frame is closed: safe point for the deferred cover-art fetch
-            // (blocks this loop, but never holds the GPU mid-frame).
-            ((PlaybackScreen*) playback_screen)->processPendingCover();
+            // Frame is closed: safe point for ALL blocking network the UI queued
+            // (cover art, playlists, tracks, search, play/seek/shuffle/volume).
+            // Running it here (post-swap, no open frame) means a slow request
+            // pauses the loop but never holds the GPU mid-frame -> no SceGxm wedge.
+            ((PlaybackScreen*) playback_screen)->runDeferred();
         } else {
             uint64_t nap = MAX_NAP_US;
             uint64_t until_frame = last_present + IDLE_FRAME_US - now;
