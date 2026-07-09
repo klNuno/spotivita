@@ -108,7 +108,7 @@ int API::get_playlist_items(uint8_t **buf, std::string playlist_id, std::string 
 
     int len = download(url.c_str(), buf, "GET", "", headers);
     if (len <= 0) {
-        buf = NULL;
+        *buf = NULL;
         return 0;
     }
 
@@ -127,7 +127,7 @@ int API::get_available_devices(uint8_t **buf) {
 
     int len = download(SPOTIFY_API_GET_AVAILABLE_DEVICES, buf, "GET", "", headers);
     if (len <= 0) {
-        buf = NULL;
+        *buf = NULL;
         return 0;
     }
 
@@ -200,6 +200,45 @@ void API::set_repeat(const char *mode) {
     Headers headers = { {"Authorization: Bearer " + token} };
     download(url.c_str(), &buf, "PUT", "", headers);
     if (buf) free(buf);
+}
+
+// User's playlist list (rootlist) over spclient. Response is playlist4
+// SelectedListContent protobuf (parsed in PlaybackScreen), NOT JSON. This is
+// what replaces the rate-limited api.spotify.com/v1/me/playlists.
+int API::get_rootlist(uint8_t **buf, uint16_t limit) {
+    if (token.empty() || user.empty()) {
+        return -1;
+    }
+    std::string url = SPCLIENT_BASE "/playlist/v2/user/";
+    url += user;
+    url += "/rootlist?from=0&length=";
+    url += std::to_string(limit);
+
+    // Reused keep-alive handle: the follow-up name fetches ride the same
+    // connection this call opens (no per-request DNS/handshake).
+    int len = spclient_get(url.c_str(), token, buf);
+    if (len <= 0) {
+        *buf = NULL;
+        return 0;
+    }
+    return len;
+}
+
+// One playlist's metadata over spclient (protobuf). Used to resolve the display
+// name; the rootlist only carries playlist URIs, not names.
+int API::get_playlist_detail(uint8_t **buf, std::string playlist_id) {
+    if (token.empty()) {
+        return -1;
+    }
+    std::string url = SPCLIENT_BASE "/playlist/v2/playlist/";
+    url += playlist_id;
+
+    int len = spclient_get(url.c_str(), token, buf);
+    if (len <= 0) {
+        *buf = NULL;
+        return 0;
+    }
+    return len;
 }
 
 int API::search(uint8_t **buf, std::string query, std::string type, uint16_t limit) {

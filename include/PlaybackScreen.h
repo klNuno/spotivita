@@ -62,6 +62,15 @@ class PlaybackScreen: public Screen {
     uint64_t backoffUntilUs = 0;
     int backoffStep = 0;
 
+    // Progressive playlist-name resolution. The spclient rootlist returns only
+    // playlist URIs; each name is a separate spclient fetch. namesPending walks
+    // one playlist per off-frame tick (nameCursor) so the UI never blocks on a
+    // burst of ~50 requests, then the completed list is cached to disk.
+    bool namesPending = false;
+    int nameCursor = 0;
+    int nameFailStreak = 0;   // abort the name burst if spclient is unreachable
+    void resolveNextName();
+
     // Deferred network intents, set by the UI, run in runDeferred() off-frame.
     bool wantPlaylists = false;
     int wantTracks = -1;
@@ -76,6 +85,7 @@ class PlaybackScreen: public Screen {
     int wantVolume = -1;
     std::vector<SearchTrack> searchResults;
     std::string searchQuery;
+    bool searchPending = false;   // spinner while a search request is in flight
     Tab tab = Tab::LIBRARY;
     int openPlaylist = -1;   // -1 = playlist list, else index into playlists
 

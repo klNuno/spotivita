@@ -17,11 +17,23 @@
 #define SPOTIFY_API_GET_PLAYLIST_ITEMS_e   "/tracks"
 #define SPOTIFY_API_GET_AVAILABLE_DEVICES  "https://api.spotify.com/v1/me/player/devices"
 
+// Internal Spotify serving host (spclient). The public api.spotify.com/v1 is
+// rate-limited PER client_id, and the keymaster/android client_id we mint the
+// token with is shared by every librespot-based app on earth -> permanent 429.
+// spclient is the internal path the official apps use; the SAME session token
+// works there and is NOT subject to that shared public quota. Verified live:
+// spclient rootlist -> 200 while api.spotify.com/v1 -> 429 with the same token.
+#define SPCLIENT_BASE                      "https://spclient.wg.spotify.com"
+
 class API {
  public:
     API() {}
     void set_token(std::string _token);
+    void set_user(std::string _user) { user = _user; }
     bool has_token() const { return !token.empty(); }
+    // Playlists via spclient (protobuf, not rate-limited like the public API).
+    int get_rootlist(uint8_t **buf, uint16_t limit);
+    int get_playlist_detail(uint8_t **buf, std::string playlist_id);
     void play_by_uri(std::string uri, uint32_t offset_pos, uint32_t position_ms);
     void play_track(std::string track_uri);
     void seek(uint32_t position_ms);
@@ -34,4 +46,5 @@ class API {
 
  private:
     std::string token;
+    std::string user;
 };

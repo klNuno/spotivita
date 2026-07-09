@@ -57,6 +57,13 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/bell/HTTPServer.cpp
 # path rebuilds the session cleanly.
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/ShannonConnection.cpp
      DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/src)
+# Reconnect path is exception-unsafe: recvPacket/reconnectedCallback (spirc
+# subscribe) throw std::runtime_error on a blipped AP link, and the throw
+# unwinds out of the recv thread -> std::terminate -> abort (coredump-confirmed
+# _kill_r/__verbose_terminate_handler crash). The patch broadens the catch and
+# guards reconnectedCallback so a reconnect never crashes the process.
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/MercuryManager.cpp
+     DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/src)
 
 # Surgical edit to the pinned cspot CMakeLists (bell is replaced wholesale above).
 #  1) CMake >= 3.27 hard-errors on cmake_minimum_required < 3.5.

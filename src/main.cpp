@@ -223,13 +223,28 @@ int start_cspot(SceSize _args, void *_argp) {
                 CLIENT_ID_ANDROID, DEVICE_ID, USER_AGENT, blob->username, blob->authData);
             if (!accessToken.empty()) {
                 gui->api.set_token(accessToken);
+                gui->api.set_user(blob->username);  // needed for the spclient rootlist URL
             } else {
                 CSPOT_LOG(error, "login5: no Web API token; in-app browsing disabled");
             }
         }
 
         while (gui->isRunning) {
-            mercuryManager->updateQueue();
+            // updateQueue dispatches Mercury packets to spirc/track callbacks,
+            // some of which send Mercury packets back. A send on a blipped AP
+            // link throws std::runtime_error; with no guard here it unwinds out
+            // of the cspot thread -> std::terminate -> abort (the crash seen in
+            // the coredump: _kill_r / __verbose_terminate_handler on "cspot").
+            // Heavy spclient traffic makes the blip likelier. Contain it: the
+            // separate recv (runTask) thread owns reconnection and rebuilds the
+            // session on its own, so here we just drop the failed dispatch.
+            try {
+                mercuryManager->updateQueue();
+            } catch (const std::exception& e) {
+                CSPOT_LOG(error, "updateQueue exception contained: %s", e.what());
+            } catch (...) {
+                CSPOT_LOG(error, "updateQueue exception contained (unknown)");
+            }
             sceKernelDelayThread(10000);
         }
 
@@ -369,25 +384,18 @@ int main(void) {
     dbg_mark(autoLogin ? "07-thread-autologin" : "07-thread-zeroconf");
 
     dbg_mark("08-pre-gui-start");
-    gui.start();
+    gui.start();  // returns when the watchdog sets isRunning=false (quit/logout)
 
+    // Do NOT gracefully join the worker threads here. On shutdown the cspot
+    // thread runs spircController->disconnect() (a blocking network write); if
+    // we tore the net stack down first (term_network) or the AP link is slow,
+    // that call hangs forever, so sceKernelWaitThreadEnd(cspot_id) never
+    // returns. The process then never reaches exitProcess, keeps holding the
+    // GXM display, and the LiveArea shell can't reclaim it -> the console menu
+    // degrades and freezes after "closing" the app. sceKernelExitProcess
+    // terminates every thread and releases GXM, the audio port, and the net
+    // stack, so just flush the log and exit immediately.
     flush_logger();
-
-    sceAppMgrReleaseBgmPort();
-    term_network();
-
-    sceKernelWaitThreadEnd(watch_id, NULL, NULL);
-    sceKernelDeleteThread(watch_id);
-    // cspot_id stays 0 until the user actually logs in (Zeroconf mode); only
-    // join/delete it if it was started. The zeroconf thread blocks in listen()
-    // and is reaped by sceKernelExitProcess below.
-    if (cspot_id != 0) {
-        sceKernelWaitThreadEnd(cspot_id, NULL, NULL);
-        sceKernelDeleteThread(cspot_id);
-    }
-
-    flush_logger();
-
-    sceKernelExitProcess(0);  // DO NOT REMOVE
+    sceKernelExitProcess(0);  // DO NOT REMOVE: kernel reaps all threads/handles
     return 0;
 }

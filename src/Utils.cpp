@@ -139,6 +139,71 @@ int download(const char *url, uint8_t **return_buffer, const char *method, std::
     return chunk.size;
 }
 
+// Persistent curl handle for spclient. NEVER cleaned up between calls: keeping
+// it alive lets curl reuse the TCP+TLS connection (keep-alive), so a burst of
+// playlist-name fetches does ONE DNS resolve + handshake total instead of one
+// per request. The per-request fresh-handle path (download) triggered "Could
+// not resolve hostname" under the burst and starved Mercury into a crash.
+static CURL *s_spclient_handle = NULL;
+
+int spclient_get(const char *url, const std::string &bearer, uint8_t **return_buffer) {
+    struct MemoryStruct chunk;
+    chunk.memory = (char *) malloc(1);
+    chunk.size = 0;
+
+    if (s_spclient_handle == NULL) {
+        s_spclient_handle = curl_easy_init();
+    }
+    CURL *h = s_spclient_handle;
+    if (h == NULL) {
+        free(chunk.memory);
+        *return_buffer = NULL;
+        return 0;
+    }
+
+    // Reset options (keeps the connection cache, so keep-alive still works) and
+    // re-apply. Same TLS hardening as download().
+    curl_easy_reset(h);
+    curl_easy_setopt(h, CURLOPT_URL, url);
+    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+    curl_easy_setopt(h, CURLOPT_WRITEDATA, (void *)&chunk);
+    curl_easy_setopt(h, CURLOPT_USERAGENT, USER_AGENT);
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(h, CURLOPT_CAINFO, TLS_CA_BUNDLE);
+    curl_easy_setopt(h, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT, 8L);
+    curl_easy_setopt(h, CURLOPT_TIMEOUT, 12L);
+    curl_easy_setopt(h, CURLOPT_TCP_KEEPALIVE, 1L);
+
+    struct curl_slist *hl = NULL;
+    std::string auth = "Authorization: Bearer " + bearer;
+    hl = curl_slist_append(hl, auth.c_str());
+    curl_easy_setopt(h, CURLOPT_HTTPHEADER, hl);
+
+    CURLcode res = curl_easy_perform(h);
+    curl_slist_free_all(hl);
+
+    if (res != CURLE_OK) {
+        CSPOT_LOG(error, "spclient_get failed: %s", curl_easy_strerror(res));
+        free(chunk.memory);
+        *return_buffer = NULL;
+        return 0;
+    }
+
+    long status_code = 0;
+    curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &status_code);
+    if (status_code != 200) {
+        CSPOT_LOG(error, "spclient_get HTTP error: %ld", status_code);
+        free(chunk.memory);
+        *return_buffer = NULL;
+        return 0;
+    }
+
+    *return_buffer = (uint8_t *) chunk.memory;
+    return static_cast<int>(chunk.size);
+}
+
 // Simple helper function to load an image into a OpenGL texture with common settings
 bool LoadTextureFromFile(const char* filename, GLuint* out_texture, int* out_width, int* out_height) {
     int image_width = 0;

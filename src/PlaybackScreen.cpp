@@ -89,11 +89,164 @@ bool barControl(const char* id, float value, ImVec2 size,
     return held;
 }
 
+// Spinning arc + label, drawn inline. The heavy network runs off-frame (after
+// the swap), so during a blocking curl the last frame stays on screen frozen;
+// a visible spinner on that frame at least tells the user "working", instead of
+// a dead still image with no feedback. When ticks are frequent (progressive
+// name/track resolution) it actually animates.
+void Spinner(const char* label, ImU32 col) {
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float r = 9.0f;
+    float cx = p.x + r, cy = p.y + r + 2.0f;
+    float t = static_cast<float>(ImGui::GetTime());
+    float a0 = t * 6.0f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->PathClear();
+    dl->PathArcTo(ImVec2(cx, cy), r, a0, a0 + 4.2f, 24);
+    dl->PathStroke(col, false, 2.5f);
+    ImGui::Dummy(ImVec2(r * 2.0f + 6.0f, r * 2.0f + 4.0f));
+    if (label && *label) {
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(179, 179, 179, 255));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(label);
+        ImGui::PopStyleColor();
+    }
+}
+
+// Playlist list is cached to disk so a relaunch shows the library instantly
+// with ZERO network. The keymaster client_id is globally rate-limited, so
+// re-fetching on every launch is what triggers the permanent 429 storm; fetch
+// once, persist, and only refresh on explicit user request.
+const char* PLAYLIST_CACHE_PATH = "ux0:data/cspot/playlists.json";
+
+std::vector<Playlist> loadPlaylistCache() {
+    std::vector<Playlist> out;
+    FILE* f = fopen(PLAYLIST_CACHE_PATH, "rb");
+    if (!f) return out;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n <= 0) { fclose(f); return out; }
+    std::string buf(static_cast<size_t>(n), '\0');
+    size_t rd = fread(&buf[0], 1, static_cast<size_t>(n), f);
+    fclose(f);
+    buf.resize(rd);
+    cJSON* root = cJSON_Parse(buf.c_str());
+    if (!root) return out;
+    if (cJSON_IsArray(root)) {
+        int c = cJSON_GetArraySize(root);
+        for (int i = 0; i < c; i++) {
+            cJSON* it = cJSON_GetArrayItem(root, i);
+            cJSON* nm = cJSON_GetObjectItem(it, "name");
+            cJSON* ur = cJSON_GetObjectItem(it, "uri");
+            if (cJSON_IsString(nm) && nm->valuestring &&
+                cJSON_IsString(ur) && ur->valuestring) {
+                out.push_back({std::string(nm->valuestring),
+                               std::string(ur->valuestring), {}, false});
+            }
+        }
+    }
+    cJSON_Delete(root);
+    return out;
+}
+
+void savePlaylistCache(const std::vector<Playlist>& pls) {
+    cJSON* root = cJSON_CreateArray();
+    for (const auto& p : pls) {
+        cJSON* o = cJSON_CreateObject();
+        cJSON_AddStringToObject(o, "name", p.name.c_str());
+        cJSON_AddStringToObject(o, "uri", p.uri.c_str());
+        cJSON_AddItemToArray(root, o);
+    }
+    char* txt = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!txt) return;
+    FILE* f = fopen(PLAYLIST_CACHE_PATH, "wb");
+    if (f) {
+        fwrite(txt, 1, strlen(txt), f);
+        fclose(f);
+    }
+    free(txt);
+}
+
+// Minimal protobuf wire reader: collect every length-delimited (wire type 2)
+// field numbered `want` inside [p,end). Enough to walk the playlist4
+// SelectedListContent message (nested length-delimited submessages) without
+// generating a new nanopb proto. Field numbers verified against live responses:
+//   rootlist:  contents=5 -> items=3(repeated) -> Item.uri=1
+//   detail:    attributes=3 -> ListAttributes.name=1
+std::vector<std::pair<const uint8_t*, size_t>> pbLenFields(
+        const uint8_t* p, const uint8_t* end, int want) {
+    std::vector<std::pair<const uint8_t*, size_t>> out;
+    while (p < end) {
+        uint64_t key = 0; int sh = 0; bool ok = false;
+        while (p < end) { uint8_t b = *p++; 
+                          if (sh >= 64) { ok = false; break; }
+                          key |= static_cast<uint64_t>(b & 0x7F) << sh;
+                          if (!(b & 0x80)) { ok = true; break; } sh += 7; }
+        if (!ok) break;
+        int field = static_cast<int>(key >> 3), wt = static_cast<int>(key & 7);
+        if (wt == 2) {
+            uint64_t len = 0; sh = 0; ok = false;
+            while (p < end) { uint8_t b = *p++; 
+                              if (sh >= 64) { ok = false; break; }
+                              len |= static_cast<uint64_t>(b & 0x7F) << sh;
+                              if (!(b & 0x80)) { ok = true; break; } sh += 7; }
+            if (!ok || len > static_cast<size_t>(end - p)) break;
+            if (field == want) out.push_back({p, static_cast<size_t>(len)});
+            p += len;
+        } else if (wt == 0) {
+            while (p < end && (*p & 0x80)) p++;
+            if (p < end) p++;
+        } else if (wt == 5) { if (end - p < 4) break; p += 4; }
+        else if (wt == 1) { if (end - p < 8) break; p += 8; }
+        else break;
+    }
+    return out;
+}
+
+// Playlist ids (base62, after "spotify:playlist:") from a rootlist protobuf.
+std::vector<std::string> parseRootlist(const uint8_t* data, size_t len) {
+    std::vector<std::string> ids;
+    const uint8_t* end = data + len;
+    auto contents = pbLenFields(data, end, 5);       // SelectedListContent.contents
+    if (contents.empty()) return ids;
+    auto items = pbLenFields(contents[0].first, contents[0].first + contents[0].second, 3);
+    const std::string pre = "spotify:playlist:";
+    for (auto& it : items) {
+        auto uris = pbLenFields(it.first, it.first + it.second, 1);   // Item.uri
+        if (uris.empty()) continue;
+        std::string uri(reinterpret_cast<const char*>(uris[0].first), uris[0].second);
+        if (uri.rfind(pre, 0) == 0) ids.push_back(uri.substr(pre.size()));
+    }
+    return ids;
+}
+
+// Display name from a playlist detail protobuf ("" if absent, e.g. HTTP 400 on
+// editorial 37i9... playlists whose detail endpoint rejects the request).
+std::string parsePlaylistName(const uint8_t* data, size_t len) {
+    const uint8_t* end = data + len;
+    auto attrs = pbLenFields(data, end, 3);          // SelectedListContent.attributes
+    if (attrs.empty()) return "";
+    auto names = pbLenFields(attrs[0].first, attrs[0].first + attrs[0].second, 1);
+    if (names.empty()) return "";
+    return std::string(reinterpret_cast<const char*>(names[0].first), names[0].second);
+}
+
 }  // namespace
 
 PlaybackScreen::PlaybackScreen(GUI *gui) : Screen(gui) {
     LoadTextureFromFile("app0:cover_art.png", &placeholder_tex, &cover_art_width, &cover_art_height);
     cover_art_tex = placeholder_tex;
+
+    // Restore the cached playlist list: instant, no network. Marking the fetch
+    // as already done stops the auto-fetch on the first Library visit (that is
+    // what rate-limits the app on every launch).
+    playlists = loadPlaylistCache();
+    if (!playlists.empty()) {
+        playlistsRequested = true;
+    }
 }
 
 PlaybackScreen::~PlaybackScreen() {
@@ -177,6 +330,13 @@ void PlaybackScreen::runDeferred() {
     if (wantPlaylists) {
         wantPlaylists = false;
         getPlaylists();
+        return;
+    }
+    // Lowest priority: resolve one playlist name per frame after a rootlist
+    // fetch. Runs off-frame like everything else, so the ~50-request burst
+    // never blocks the GPU; the UI shows names filling in, then it's cached.
+    if (namesPending) {
+        resolveNextName();
         return;
     }
 }
@@ -342,13 +502,13 @@ void PlaybackScreen::drawBrowse(const PlayerModel::Snapshot& snap) {
 
     switch (tab) {
         case Tab::LIBRARY: {
-            // Gate on the token, not on cspot_started: it avoids pointless
-            // 401s AND keeps this first fetch from racing the login5 curl
-            // calls happening on the cspot thread at boot.
-            // Fetch once when the token arrives; keep retrying (paced by the 5 s
-            // cooldown in getPlaylists) while rate-limited and still empty.
-            if (gui->api.has_token() && (!playlistsRequested ||
-                                         (rateLimited && playlists.empty()))) {
+            // ONE fetch, ever: only when we have a token, have never fetched,
+            // and have no cached list. NO auto-retry on rate limit -- retrying
+            // is exactly what sustains the global 429. If it fails the user hits
+            // "Refresh playlists" in Settings, which clears playlistsRequested.
+            // Gate on the token (not cspot_started) to avoid racing the login5
+            // curl on the cspot thread at boot.
+            if (gui->api.has_token() && !playlistsRequested) {
                 playlistsRequested = true;
                 wantPlaylists = true;
             }
@@ -384,6 +544,9 @@ void PlaybackScreen::drawBrowse(const PlayerModel::Snapshot& snap) {
                 if (!pl.tracks_loaded) {
                     wantTracks = openPlaylist;
                 }
+                if (!pl.tracks_loaded && pl.tracks.empty()) {
+                    Spinner("Chargement des titres...", COL_GREENV);
+                }
                 for (uint32_t t = 0; t < pl.tracks.size(); t++) {
                     std::string lbl = pl.tracks[t] + "##t" + std::to_string(t);
                     // Currently playing track is tinted Spotify green.
@@ -398,10 +561,14 @@ void PlaybackScreen::drawBrowse(const PlayerModel::Snapshot& snap) {
                 ImGui::PopFont();
                 ImGui::Dummy(ImVec2(0.0f, 6.0f));
 
+                if (namesPending) {
+                    Spinner("Chargement...", COL_GREENV);
+                    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+                }
                 if (playlists.empty()) {
                     const char* msg = !gui->api.has_token() ? "Connecting..."
-                                    : rateLimited ? "Spotify rate limit, retrying..."
-                                    : "No playlists.";
+                                    : rateLimited ? "Rate limited. Try Refresh in Settings later."
+                                    : "No playlists yet. Refresh in Settings.";
                     ImGui::PushStyleColor(ImGuiCol_Text, COL_GREY);
                     ImGui::TextUnformatted(msg);
                     ImGui::PopStyleColor();
@@ -429,11 +596,20 @@ void PlaybackScreen::drawBrowse(const PlayerModel::Snapshot& snap) {
                 if (!q.empty()) {
                     searchQuery = q;
                     wantSearch = q;
+                    searchPending = true;
+                    searchResults.clear();
                 }
             }
             ImGui::PopStyleVar();
             ImGui::Dummy(ImVec2(0.0f, 6.0f));
 
+            if (searchPending) {
+                Spinner("Recherche...", COL_GREENV);
+            } else if (!searchQuery.empty() && searchResults.empty()) {
+                ImGui::PushStyleColor(ImGuiCol_Text, COL_GREY);
+                ImGui::TextUnformatted("Aucun resultat.");
+                ImGui::PopStyleColor();
+            }
             for (size_t i = 0; i < searchResults.size(); i++) {
                 std::string lbl = searchResults[i].label + "##r" + std::to_string(i);
                 if (listRow(lbl.c_str(), avail, COL_WHITE)) {
@@ -456,9 +632,11 @@ void PlaybackScreen::drawBrowse(const PlayerModel::Snapshot& snap) {
             ImGui::TextUnformatted("Settings");
             ImGui::PopFont();
             ImGui::Dummy(ImVec2(0.0f, 6.0f));
+            // Keep the current (cached) list on screen; getPlaylists only
+            // replaces it on a successful fetch, so a failed refresh doesn't
+            // wipe what the user could already browse.
             if (ImGui::Button("Refresh playlists", ImVec2(avail, 0.0f))) {
-                playlists.clear();
-                playlistsRequested = false;   // re-fetch on next Library visit
+                playlistsRequested = false;   // allow exactly one more fetch
                 backoffStep = 0;
                 backoffUntilUs = 0;
                 wantPlaylists = true;
@@ -612,70 +790,97 @@ void PlaybackScreen::getPlaylists() {
     if (!gui->api.has_token()) {
         return;
     }
-    // Spotify's rate limit is a rolling ~30 s window: retrying every few seconds
-    // never lets it drain, so a 429 sustains itself forever. Back off with a
-    // growing wait (30 s, 60 s, ... up to ~4 min) so the window can actually
-    // clear before the next attempt.
-    uint64_t now = sceKernelGetProcessTimeWide();
-    if (now < backoffUntilUs) {
+    CSPOT_LOG(debug, "Get rootlist (spclient)");
+    // Fetch the user's playlist list over spclient (NOT api.spotify.com, which
+    // 429s on the shared keymaster client_id). Response is playlist4 protobuf:
+    // a list of playlist URIs only -- names are resolved one-by-one afterwards
+    // by resolveNextName(), off-frame, then cached. Retry a few times: the
+    // Vita's DNS resolver is flaky on the FIRST lookup for a host (cold
+    // connection); once it resolves, keep-alive reuses it for the name fetches.
+    uint8_t *data = NULL;
+    int len = 0;
+    for (int attempt = 0; attempt < 3 && len <= 0; attempt++) {
+        if (data != NULL) {
+            free(data);
+            data = NULL;
+        }
+        len = gui->api.get_rootlist(&data, SPOTIFY_PLAYLIST_FETCH_CHUNK_SIZE);
+    }
+    if (len <= 0 || data == NULL) {
+        CSPOT_LOG(error, "rootlist request failed");
+        if (data != NULL) free(data);
         return;
     }
 
-    CSPOT_LOG(debug, "Get playlists");
-    // ONE request, first page only (limit 50). The keymaster client_id is
-    // globally rate-limited (~1 req / 2 s, shared by every librespot user);
-    // paginating in a tight loop instantly re-triggers the 429. First 50
-    // playlists is plenty for browsing.
-    uint8_t *json_data = NULL;
-    int json_len = gui->api.get_current_users_playlists(&json_data,
-                                                        SPOTIFY_PLAYLIST_FETCH_CHUNK_SIZE, 0);
-    if (json_len <= 0) {
-        CSPOT_LOG(error, "error requesting playlists");
-        if (json_data != NULL) free(json_data);
+    std::vector<std::string> ids = parseRootlist(data, static_cast<size_t>(len));
+    free(data);
+    if (ids.empty()) {
+        CSPOT_LOG(error, "rootlist parse: no playlists");
         return;
     }
 
-    cJSON *root = cJSON_Parse((const char *) json_data);
-    free(json_data);
-    if (root == NULL) {
-        return;
-    }
-    if (cJSON_HasObjectItem(root, "error")) {
-        // 429 / auth error: keep the old list, flag it, back off with a growing
-        // wait so we stop feeding our own throttle.
-        rateLimited = true;
-        if (backoffStep < 8) backoffStep++;
-        backoffUntilUs = now + static_cast<uint64_t>(backoffStep) * 30000000ULL;
-        cJSON_Delete(root);
-        return;
-    }
-    cJSON *json_items = cJSON_GetObjectItem(root, "items");
-    if (!cJSON_IsArray(json_items)) {
-        cJSON_Delete(root);
-        return;
-    }
     rateLimited = false;
     backoffStep = 0;
-
     std::vector<Playlist> fresh;
-    int count = cJSON_GetArraySize(json_items);
-    for (int i = 0; i < count; i++) {
-        cJSON *item = cJSON_GetArrayItem(json_items, i);
-        cJSON *pname = cJSON_GetObjectItem(item, "name");
-        cJSON *puri = cJSON_GetObjectItem(item, "uri");
-        if (cJSON_IsString(pname) && pname->valuestring != NULL &&
-            cJSON_IsString(puri) && puri->valuestring != NULL) {
-            fresh.push_back({std::string(pname->valuestring),
-                             std::string(puri->valuestring), {}, false});
-        }
+    for (const auto& id : ids) {
+        // Placeholder name until resolveNextName() fills it in; keep the full
+        // "spotify:playlist:<id>" URI so getTracks/play still work unchanged.
+        fresh.push_back({"\xE2\x80\xA6",  // horizontal ellipsis
+                         SPOTIFY_PLAYLIST_HEADER + id, {}, false});
     }
     playlists = std::move(fresh);
-    cJSON_Delete(root);
-    CSPOT_LOG(debug, "Got %d playlists", playlists.size());
+    namesPending = true;
+    nameCursor = 0;
+    nameFailStreak = 0;
+    CSPOT_LOG(debug, "Rootlist: %d playlists, resolving names", playlists.size());
+}
+
+// One spclient playlist-detail fetch per call to resolve a display name. Walks
+// nameCursor through the list; when done, persists the named list to disk so
+// the next launch is instant with zero network.
+void PlaybackScreen::resolveNextName() {
+    if (!namesPending) {
+        return;
+    }
+    if (nameCursor >= static_cast<int>(playlists.size())) {
+        namesPending = false;
+        savePlaylistCache(playlists);
+        CSPOT_LOG(debug, "Playlist names resolved, cached");
+        return;
+    }
+
+    Playlist& pl = playlists[nameCursor];
+    std::string id = pl.uri;
+    if (id.rfind(SPOTIFY_PLAYLIST_HEADER, 0) == 0) {
+        id.erase(0, strlen(SPOTIFY_PLAYLIST_HEADER));
+    }
+
+    uint8_t *data = NULL;
+    int len = gui->api.get_playlist_detail(&data, id);
+    if (len > 0 && data != NULL) {
+        std::string name = parsePlaylistName(data, static_cast<size_t>(len));
+        pl.name = name.empty() ? std::string("Playlist") : name;
+        nameFailStreak = 0;
+    } else {
+        pl.name = "Playlist";
+        // spclient unreachable (DNS/network). Don't grind through all 45 -- that
+        // is what starved Mercury and crashed. Bail after a short streak; the
+        // user can retry via Settings > Refresh once the network settles.
+        if (++nameFailStreak >= 5) {
+            CSPOT_LOG(error, "name resolution: %d consecutive failures, aborting", nameFailStreak);
+            namesPending = false;
+            savePlaylistCache(playlists);
+            if (data != NULL) free(data);
+            return;
+        }
+    }
+    if (data != NULL) free(data);
+    nameCursor++;
 }
 
 void PlaybackScreen::runSearch(const std::string& query) {
     searchResults.clear();
+    searchPending = false;   // request done (success or fail); stop the spinner
 
     uint8_t* data = NULL;
     int len = gui->api.search(&data, query, "track", 10);

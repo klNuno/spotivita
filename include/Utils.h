@@ -46,6 +46,12 @@ void term_network();
 void dbg_mark(const char *s);
 int download(const char *url, uint8_t **return_buffer, const char *method = "GET",
                         std::string post_data = "", Headers headers = {});
+// GET over a PERSISTENT, reused curl handle (keep-alive). A burst of playlist
+// name lookups all hit the same host (spclient), so reusing one connection
+// means a single DNS resolve + TLS handshake instead of one per request. The
+// Vita's resolver chokes on rapid getaddrinfo bursts and the socket churn
+// starves the Mercury link into a crash; one reused connection avoids it.
+int spclient_get(const char *url, const std::string &bearer, uint8_t **return_buffer);
 bool cache_cover_art(std::string url, uint8_t *buffer, uint32_t length);
 std::string cover_art_path(std::string url);
 bool is_cover_cached(std::string url);
