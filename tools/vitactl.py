@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Drive a psvitify devkit build (PSVITIFY_DEVKIT=ON) over TCP port 2138.
+
+Works against a real Vita on the LAN or Vita3K on this PC (127.0.0.1, with
+ux0:data/cspot/loopback present). One command per call, or several with ';':
+
+  vitactl.py [--host H] state
+  vitactl.py tap 700 200
+  vitactl.py swipe 700 450 700 150 [frames]
+  vitactl.py press start          (cross circle square triangle up down left right l r start select, '+' joins)
+  vitactl.py ui search daft punk  (screen hook: tab NAME, search Q, open N, back, refresh, toast TEXT)
+  vitactl.py shot out.png         (BMP from the device, converted to PNG when Pillow is present)
+  vitactl.py log [bytes]
+  vitactl.py get ux0:data/cspot/log.txt local.txt
+  vitactl.py put local_eboot.bin ux0:app/PSVITIFY1/eboot.bin
+  vitactl.py deploy build/dev/eboot.bin   (put eboot + relaunch, then wait for the app to answer)
+  vitactl.py wait [seconds]       (poll until the app answers ping)
+"""
+import argparse
+import json
+import os
+import socket
+import sys
+import time
+
+PORT = 2138
+TITLE_ID = "PSVITIFY1"
+
+
+class Link:
+    def __init__(self, host, timeout=10.0):
+        self.sock = socket.create_connection((host, PORT), timeout=timeout)
+        self.buf = b""
+
+    def _line(self):
+        while b"\n" not in self.buf:
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise ConnectionError("connection closed")
+            self.buf += chunk
+        line, self.buf = self.buf.split(b"\n", 1)
+        return line.decode("utf-8", "replace")
+
+    def _exact(self, n):
+        while len(self.buf) < n:
+            chunk = self.sock.recv(max(65536, n - len(self.buf)))
+            if not chunk:
+                raise ConnectionError("connection closed")
+            self.buf += chunk
+        data, self.buf = self.buf[:n], self.buf[n:]
+        return data
+
+    def text(self, cmd):
+        self.sock.sendall((cmd + "\n").encode("utf-8"))
+        return self._line()
+
+    def blob(self, cmd, payload=None):
+        self.sock.sendall((cmd + "\n").encode("utf-8"))
+        if payload is not None:
+            self.sock.sendall(payload)
+            return self._line(), None
+        head = self._line()
+        if not head.startswith("OK "):
+            return head, None
+        return "OK", self._exact(int(head[3:]))
+
+
+def save_image(data, path):
+    if path.lower().endswith(".png"):
+        try:
+            from io import BytesIO
+            from PIL import Image
+            Image.open(BytesIO(data)).save(path)
+            return path
+        except ImportError:
+            path = path[:-4] + ".bmp"
+    with open(path, "wb") as f:
+        f.write(data)
+    return path
+
+
+def wait_ready(host, seconds):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        try:
+            if Link(host, timeout=2.0).text("ping") == "OK pong":
+                return True
+        except OSError:
+            pass
+        time.sleep(0.5)
+    return False
+
+
+def run(host, argv):
+    cmd = argv[0]
+    if cmd == "wait":
+        ok = wait_ready(host, float(argv[1]) if len(argv) > 1 else 30)
+        print("OK ready" if ok else "ERR no answer")
+        return 0 if ok else 1
+    link = Link(host)
+    if cmd == "state":
+        r = link.text("state")
+        if r.startswith("OK "):
+            print(json.dumps(json.loads(r[3:]), indent=2, ensure_ascii=False))
+            return 0
+        print(r)
+        return 1
+    if cmd == "shot":
+        r, data = link.blob("shot")
+        if data is None:
+            print(r)
+            return 1
+        print("OK", save_image(data, argv[1] if len(argv) > 1 else "shot.png"))
+        return 0
+    if cmd == "log":
+        r, data = link.blob("log " + (argv[1] if len(argv) > 1 else "8192"))
+        sys.stdout.write(data.decode("utf-8", "replace") if data else r + "\n")
+        return 0 if data is not None else 1
+    if cmd == "get":
+        r, data = link.blob("get " + argv[1])
+        if data is None:
+            print(r)
+            return 1
+        out = argv[2] if len(argv) > 2 else os.path.basename(argv[1].split(":")[-1])
+        with open(out, "wb") as f:
+            f.write(data)
+        print("OK", out, len(data))
+        return 0
+    if cmd in ("put", "deploy"):
+        local = argv[1]
+        remote = argv[2] if cmd == "put" else "ux0:app/%s/eboot.bin" % TITLE_ID
+        with open(local, "rb") as f:
+            data = f.read()
+        r, _ = link.blob("put %s %d" % (remote, len(data)), data)
+        print(r)
+        if cmd == "put" or not r.startswith("OK"):
+            return 0 if r.startswith("OK") else 1
+        print(link.text("relaunch"))
+        time.sleep(2.0)
+        ok = wait_ready(host, 40)
+        print("OK relaunched" if ok else "ERR app did not come back")
+        return 0 if ok else 1
+    r = link.text(" ".join(argv))
+    print(r)
+    return 0 if r.startswith("OK") else 1
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--host", default=os.environ.get("VITA_HOST", "127.0.0.1"))
+    ap.add_argument("command", nargs=argparse.REMAINDER)
+    args = ap.parse_args()
+    if not args.command:
+        ap.print_help()
+        return 2
+    rc = 0
+    for part in " ".join(args.command).split(";"):
+        part = part.strip()
+        if part:
+            rc = run(args.host, part.split()) or rc
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

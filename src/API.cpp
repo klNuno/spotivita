@@ -1,10 +1,13 @@
 #include "API.h"
 #include "Utils.h"
 #include <Logger.h>
+#include <psp2/kernel/processmgr.h>
 #include "Config.h"
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <string>
+#include <utility>
 
 // Percent-encode a query string for safe use in a URL (RFC 3986 unreserved set).
 static std::string urlencode(const std::string& s) {
@@ -22,244 +25,208 @@ static std::string urlencode(const std::string& s) {
     return out;
 }
 
-void API::set_token(std::string _token) {
-    token = _token;
+// JSON string literal body for the small player payloads we build by hand.
+static std::string jsonString(const std::string& s) {
+    std::string out = "\"";
+    for (char c : s) {
+        if (c == '"' || c == '\\') out += '\\';
+        out += c;
+    }
+    out += '"';
+    return out;
 }
 
-void API::play_by_uri(std::string uri, uint32_t offset_pos, uint32_t position_ms) {
-    if (token.size() == 0) {
-        return;
+std::string spotify_base62_to_hex(const std::string &id) {
+    static const char *digits =
+        "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    if (id.size() != 22) {
+        return "";
     }
+    uint8_t n[16] = {0};
+    for (char c : id) {
+        const char *d = strchr(digits, c);
+        if (d == NULL || c == '\0') {
+            return "";
+        }
+        // n = n * 62 + digit, big-endian bytes.
+        unsigned carry = static_cast<unsigned>(d - digits);
+        for (int i = 15; i >= 0; i--) {
+            unsigned v = n[i] * 62u + carry;
+            n[i] = static_cast<uint8_t>(v & 0xFF);
+            carry = v >> 8;
+        }
+    }
+    static const char *hex = "0123456789abcdef";
+    std::string out;
+    for (uint8_t b : n) {
+        out += hex[b >> 4];
+        out += hex[b & 0x0F];
+    }
+    return out;
+}
 
-    std::string url = SPOTIFY_API_PLAY_URL;
-    url += "?device_id=";
-    url += DEVICE_ID;
+void API::set_token(const std::string &token, int expiresInS) {
+    std::lock_guard<std::mutex> g(mutex_);
+    token_ = token;
+    // Refresh a minute early so a request never races the expiry.
+    int life = expiresInS > 120 ? expiresInS - 60 : 3000;
+    expiresAtUs_ = sceKernelGetProcessTimeWide() + static_cast<uint64_t>(life) * 1000000ULL;
+    hasToken_ = !token.empty();
+}
 
-    // TODO(michal4132): Replace with json object
-    std::string post_data = "{\"context_uri\": \"";
-    post_data += uri;
-    post_data += "\",\"offset\": {\"position\": ";
-    post_data += std::to_string(offset_pos);
-    post_data += "},\"position_ms\": ";
-    post_data += std::to_string(position_ms);
-    post_data += "}";
-    uint8_t *buf;
-    Headers headers = { {"Accept: application/json"},
-                        {"Content-Type: application/json"},
-                        {"Authorization: Bearer " + token} };
-    int len = download(url.c_str(), &buf, "PUT", post_data, headers);
-    if (len > 0) {
-        CSPOT_LOG(info, "play_by_uri response: %.*s", len, buf);
+void API::set_user(const std::string &user) {
+    std::lock_guard<std::mutex> g(mutex_);
+    user_ = user;
+}
+
+void API::set_refresher(TokenRefresher refresher) {
+    std::lock_guard<std::mutex> g(mutex_);
+    refresher_ = std::move(refresher);
+}
+
+// login5 tokens last one hour. The old code minted one at login and never
+// again, so every browse call silently failed with 401 an hour into a session.
+std::string API::bearer(bool forceRefresh) {
+    TokenRefresher refresher;
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        bool expired = sceKernelGetProcessTimeWide() >= expiresAtUs_;
+        if (!forceRefresh && !expired && !token_.empty()) {
+            return token_;
+        }
+        refresher = refresher_;
+    }
+    if (!refresher) {
+        std::lock_guard<std::mutex> g(mutex_);
+        return token_;
+    }
+    int expiresIn = 0;
+    std::string fresh = refresher(&expiresIn);
+    if (fresh.empty()) {
+        CSPOT_LOG(error, "token refresh failed, keeping the old token");
+        std::lock_guard<std::mutex> g(mutex_);
+        return token_;
+    }
+    CSPOT_LOG(info, "access token refreshed (%d s)", expiresIn);
+    set_token(fresh, expiresIn);
+    return fresh;
+}
+
+ApiResult API::web(const char *method, const std::string &url, const std::string &body) {
+    ApiResult r;
+    if (!has_token()) {
+        return r;
+    }
+    for (int attempt = 0; attempt < 2; attempt++) {
+        std::string tok = bearer(attempt > 0);
+        Headers headers = { "Accept: application/json",
+                            "Content-Type: application/json",
+                            "Authorization: Bearer " + tok };
+        uint8_t *buf = NULL;
+        int len = download(url.c_str(), &buf, method, body, headers, &r.status);
+        r.body.assign(buf != NULL ? reinterpret_cast<const char *>(buf) : "",
+                      (buf != NULL && len > 0) ? static_cast<size_t>(len) : 0);
         free(buf);
+        if (r.status != 401) {
+            break;
+        }
     }
+    if (!r.ok()) {
+        CSPOT_LOG(error, "%s %s -> %ld", method, url.c_str(), r.status);
+    }
+    return r;
 }
 
-// TODO(michal4132): limit, offset
-int API::get_current_users_playlists(uint8_t **buf, uint16_t limit, uint16_t offset) {
-    if (token.size() == 0) {
-        return -1;
+ApiResult API::spclient(const std::string &url, const char *accept) {
+    ApiResult r;
+    if (!has_token()) {
+        return r;
     }
-
-    Headers headers = { {"Accept: application/json"},
-                        {"Content-Type: application/json"},
-                        {"Authorization: Bearer " + token} };
-
-    std::string url = SPOTIFY_API_GET_USERS_PLAYLISTS;
-    url += "?limit=";
-    url += std::to_string(limit);
-    url += "&offset=";
-    url += std::to_string(offset);
-
-    int len = download(url.c_str(), buf, "GET", "", headers);
-    if (len <= 0) {
-        buf = NULL;
-        return 0;
+    // The Vita resolver often fails the FIRST lookup of a host; one retry on a
+    // transport error covers it, and keep-alive makes the follow-ups cheap.
+    for (int attempt = 0; attempt < 3; attempt++) {
+        std::string tok = bearer(r.status == 401);
+        uint8_t *buf = NULL;
+        int len = spclient_get(url.c_str(), tok, &buf, &r.status, accept);
+        r.body.assign(buf != NULL ? reinterpret_cast<const char *>(buf) : "",
+                      (buf != NULL && len > 0) ? static_cast<size_t>(len) : 0);
+        free(buf);
+        if (r.status != 0 && r.status != 401) {
+            break;
+        }
     }
-
-    CSPOT_LOG(info, "get_current_users_playlists response: %.*s", len, *buf);
-    return len;
+    return r;
 }
 
-int API::get_playlist_items(uint8_t **buf, std::string playlist_id, std::string fields,
-                                        uint16_t limit, uint16_t offset) {
-    if (token.size() == 0) {
-        return -1;
+// User's playlist list (rootlist). Response is playlist4 SelectedListContent
+// protobuf, NOT JSON. Replaces the rate-limited api.spotify.com/v1/me/playlists.
+ApiResult API::get_rootlist() {
+    std::string user;
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        user = user_;
     }
-
-    Headers headers = { {"Accept: application/json"},
-                        {"Content-Type: application/json"},
-                        {"Authorization: Bearer " + token} };
-
-    std::string url = "";
-    if (playlist_id.starts_with("https://api.spotify.com/v1/playlists/")) {
-        url += playlist_id;
-
-    } else {
-        url += SPOTIFY_API_GET_PLAYLIST_ITEMS_s;
-        url += playlist_id;
-        url += SPOTIFY_API_GET_PLAYLIST_ITEMS_e;
+    if (user.empty()) {
+        return ApiResult();
     }
-    url += "?fields=";
-    url += fields;
-    url += "&limit=";
-    url += std::to_string(limit);
-    url += "&offset=";
-    url += std::to_string(offset);
-
-    int len = download(url.c_str(), buf, "GET", "", headers);
-    if (len <= 0) {
-        *buf = NULL;
-        return 0;
-    }
-
-    CSPOT_LOG(info, "get_playlist_items response: %.*s", len, *buf);
-    return len;
+    std::string url = SPCLIENT_BASE "/playlist/v2/user/" + urlencode(user) +
+                      "/rootlist?from=0&length=" + std::to_string(SPOTIFY_ROOTLIST_LENGTH);
+    return spclient(url);
 }
 
-int API::get_available_devices(uint8_t **buf) {
-    if (token.size() == 0) {
-        return -1;
-    }
-
-    Headers headers = { {"Accept: application/json"},
-                        {"Content-Type: application/json"},
-                        {"Authorization: Bearer " + token} };
-
-    int len = download(SPOTIFY_API_GET_AVAILABLE_DEVICES, buf, "GET", "", headers);
-    if (len <= 0) {
-        *buf = NULL;
-        return 0;
-    }
-
-    CSPOT_LOG(info, "get_available_devices response: %.*s", len, *buf);
-    return len;
+// One playlist (protobuf): attributes carry the name, contents the item URIs.
+ApiResult API::get_playlist(const std::string &playlistId) {
+    return spclient(SPCLIENT_BASE "/playlist/v2/playlist/" + playlistId);
 }
 
-// Play a single track (uses "uris" rather than a context_uri + offset).
-void API::play_track(std::string track_uri) {
-    if (token.size() == 0) {
-        return;
+// Track metadata (protobuf Track: name=2, album=3, artist=4, duration=7).
+ApiResult API::get_track_metadata(const std::string &trackId) {
+    std::string gid = spotify_base62_to_hex(trackId);
+    if (gid.empty()) {
+        return ApiResult();
     }
-    std::string url = SPOTIFY_API_PLAY_URL;
-    url += "?device_id=";
-    url += DEVICE_ID;
-
-    std::string post_data = "{\"uris\": [\"" + track_uri + "\"]}";
-    uint8_t *buf = NULL;
-    Headers headers = { {"Accept: application/json"},
-                        {"Content-Type: application/json"},
-                        {"Authorization: Bearer " + token} };
-    download(url.c_str(), &buf, "PUT", post_data, headers);
-    if (buf) free(buf);
+    return spclient(SPCLIENT_BASE "/metadata/4/track/" + gid + "?market=from_token",
+                    "application/x-protobuf");
 }
 
-// Seek the active device. Spotify routes a SPIRC seek frame back to this Vita's
-// cspot, which already handles it -- so no new cspot code is needed.
-void API::seek(uint32_t position_ms) {
-    if (token.size() == 0) {
-        return;
-    }
-    std::string url = SPOTIFY_API_SEEK_URL;
-    url += "?position_ms=";
-    url += std::to_string(position_ms);
-    url += "&device_id=";
-    url += DEVICE_ID;
-
-    uint8_t *buf = NULL;
-    Headers headers = { {"Authorization: Bearer " + token} };
-    download(url.c_str(), &buf, "PUT", "", headers);
-    if (buf) free(buf);
+ApiResult API::get_playlist_tracks_web(const std::string &playlistId) {
+    std::string url = SPOTIFY_API_BASE "/playlists/" + playlistId +
+                      "/tracks?fields=items(track(name,uri,artists(name)))&limit=" +
+                      std::to_string(SPOTIFY_PLAYLIST_TRACK_LIMIT > 100 ? 100 : SPOTIFY_PLAYLIST_TRACK_LIMIT);
+    return web("GET", url);
 }
 
-void API::set_shuffle(bool on) {
-    if (token.size() == 0) {
-        return;
-    }
-    std::string url = SPOTIFY_API_SHUFFLE_URL;
-    url += on ? "?state=true" : "?state=false";
-    url += "&device_id=";
-    url += DEVICE_ID;
-
-    uint8_t *buf = NULL;
-    Headers headers = { {"Authorization: Bearer " + token} };
-    download(url.c_str(), &buf, "PUT", "", headers);
-    if (buf) free(buf);
+ApiResult API::search(const std::string &query, uint16_t limit) {
+    std::string url = SPOTIFY_API_BASE "/search?q=" + urlencode(query) +
+                      "&type=track&limit=" + std::to_string(limit);
+    return web("GET", url);
 }
 
-void API::set_repeat(const char *mode) {
-    if (token.size() == 0) {
-        return;
-    }
-    std::string url = SPOTIFY_API_REPEAT_URL;
-    url += "?state=";
-    url += mode;
-    url += "&device_id=";
-    url += DEVICE_ID;
-
-    uint8_t *buf = NULL;
-    Headers headers = { {"Authorization: Bearer " + token} };
-    download(url.c_str(), &buf, "PUT", "", headers);
-    if (buf) free(buf);
+ApiResult API::play_context(const std::string &contextUri, uint32_t offset) {
+    std::string body = "{\"context_uri\":" + jsonString(contextUri) +
+                       ",\"offset\":{\"position\":" + std::to_string(offset) +
+                       "},\"position_ms\":0}";
+    return web("PUT", SPOTIFY_API_BASE "/me/player/play?device_id=" DEVICE_ID, body);
 }
 
-// User's playlist list (rootlist) over spclient. Response is playlist4
-// SelectedListContent protobuf (parsed in PlaybackScreen), NOT JSON. This is
-// what replaces the rate-limited api.spotify.com/v1/me/playlists.
-int API::get_rootlist(uint8_t **buf, uint16_t limit) {
-    if (token.empty() || user.empty()) {
-        return -1;
-    }
-    std::string url = SPCLIENT_BASE "/playlist/v2/user/";
-    url += user;
-    url += "/rootlist?from=0&length=";
-    url += std::to_string(limit);
-
-    // Reused keep-alive handle: the follow-up name fetches ride the same
-    // connection this call opens (no per-request DNS/handshake).
-    int len = spclient_get(url.c_str(), token, buf);
-    if (len <= 0) {
-        *buf = NULL;
-        return 0;
-    }
-    return len;
+ApiResult API::play_track(const std::string &trackUri) {
+    std::string body = "{\"uris\":[" + jsonString(trackUri) + "]}";
+    return web("PUT", SPOTIFY_API_BASE "/me/player/play?device_id=" DEVICE_ID, body);
 }
 
-// One playlist's metadata over spclient (protobuf). Used to resolve the display
-// name; the rootlist only carries playlist URIs, not names.
-int API::get_playlist_detail(uint8_t **buf, std::string playlist_id) {
-    if (token.empty()) {
-        return -1;
-    }
-    std::string url = SPCLIENT_BASE "/playlist/v2/playlist/";
-    url += playlist_id;
-
-    int len = spclient_get(url.c_str(), token, buf);
-    if (len <= 0) {
-        *buf = NULL;
-        return 0;
-    }
-    return len;
+// Spotify routes a SPIRC seek frame back to this Vita's cspot, which already
+// handles it -- so no new cspot code is needed.
+ApiResult API::seek(uint32_t positionMs) {
+    return web("PUT", SPOTIFY_API_BASE "/me/player/seek?position_ms=" +
+                      std::to_string(positionMs) + "&device_id=" DEVICE_ID);
 }
 
-int API::search(uint8_t **buf, std::string query, std::string type, uint16_t limit) {
-    if (token.size() == 0) {
-        return -1;
-    }
-    Headers headers = { {"Accept: application/json"},
-                        {"Authorization: Bearer " + token} };
-
-    std::string url = SPOTIFY_API_SEARCH_URL;
-    url += "?q=";
-    url += urlencode(query);
-    url += "&type=";
-    url += type;
-    url += "&limit=";
-    url += std::to_string(limit);
-
-    int len = download(url.c_str(), buf, "GET", "", headers);
-    if (len <= 0) {
-        return 0;
-    }
-    return len;
+ApiResult API::set_shuffle(bool on) {
+    return web("PUT", std::string(SPOTIFY_API_BASE "/me/player/shuffle?state=") +
+                      (on ? "true" : "false") + "&device_id=" DEVICE_ID);
 }
 
+ApiResult API::set_repeat(const char *mode) {
+    return web("PUT", std::string(SPOTIFY_API_BASE "/me/player/repeat?state=") + mode +
+                      "&device_id=" DEVICE_ID);
+}

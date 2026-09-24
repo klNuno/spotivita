@@ -10,8 +10,8 @@ void LoginScreen::draw() {
     // top spacer
     ImGui::Dummy(ImVec2(0.0f, 42.0f));
 
-    // cspot logo
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + logo_width);
+    // cspot logo, centered
+    AlignForWidth(static_cast<float>(logo_width));
     ImGui::Image(reinterpret_cast<void*>(logo_tex), ImVec2(logo_width, logo_height));
     ImGui::Dummy(ImVec2(0.0f, 28.0f));
 

@@ -128,8 +128,18 @@ add_executable(${PROJECT_NAME}
   src/PlaybackScreen.cpp
   src/LoginScreen.cpp
   src/GuiUtils.cpp
+  src/Input.cpp
+  src/NetWorker.cpp
+  src/DevKit.cpp
   src/Compat.c
 )
+
+# Remote-control test server (see include/DevKit.h). It reads and writes files
+# over the LAN, so it is off unless a dev build asks for it.
+option(PSVITIFY_DEVKIT "Build the port 2138 debug server" OFF)
+if(PSVITIFY_DEVKIT)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE PSVITIFY_DEVKIT)
+endif()
 
 target_link_libraries(${PROJECT_NAME}
   SceBgAppUtil_stub

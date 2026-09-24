@@ -2,97 +2,105 @@
 
 #include <imgui_vita.h>
 #include <vitaGL.h>
-#include <vector>
+#include <atomic>
 #include <string>
+#include <vector>
 #include "Screen.h"
 #include "PlayerModel.h"
 
+enum class LoadState { NONE, LOADING, LOADED, FAILED };
+
+struct TrackRow {
+    std::string name;     // "" until metadata arrives
+    std::string artist;
+    std::string uri;      // spotify:track:<id>
+    uint32_t position;    // index inside the playlist, for play_context offsets
+};
+
 struct Playlist {
     std::string name;
-    std::string uri;
-    std::vector<std::string> tracks;
-    bool tracks_loaded;
+    std::string uri;      // spotify:playlist:<id>
+    std::vector<TrackRow> tracks;
+    LoadState tracksState = LoadState::NONE;
 };
 
 struct SearchTrack {
-    std::string label;   // "Title  -  Artist"
+    std::string label;    // "Title  -  Artist"
     std::string uri;
 };
 
+// Everything here runs on the GUI thread. Network work is posted to
+// gui->net and its results come back as closures drained between frames, so no
+// member is ever touched by two threads.
 class PlaybackScreen: public Screen {
  public:
     explicit PlaybackScreen(GUI *gui);
     ~PlaybackScreen();
-    void draw();
-    // Runs OUTSIDE the ImGui frame (called by the GUI loop after the swap):
-    // downloads + uploads a pending cover. Network inside an open frame would
-    // hold the GPU mid-frame for up to 30 s and can wedge SceGxm.
-    void processPendingCover();
+    void draw() override;
+    std::string debugState() override;
+    bool debugCommand(const std::string &cmd, const std::string &arg) override;
 
-    void getTracks(uint16_t index);
-    void getPlaylists();
-    void runSearch(const std::string& query);
-    void setCoverArt(std::string url);
-    // Executes the queued network actions. MUST be called by the GUI loop AFTER
-    // vglSwapBuffers, never inside the ImGui frame: curl blocks, and blocking
-    // mid-frame holds the GPU and wedges the whole console on slow wifi.
-    void runDeferred();
+    // Called by the GUI loop between frames: starts a cover fetch when the
+    // track changed.
+    void tick();
 
  private:
     enum class Tab { LIBRARY, SEARCH, LOG, SETTINGS };
 
     void drawNowPlaying(const PlayerModel::Snapshot& snap);
     void drawBrowse(const PlayerModel::Snapshot& snap);
+    void drawLibrary(const PlayerModel::Snapshot& snap, float avail);
+    void drawPlaylist(const PlayerModel::Snapshot& snap, float avail);
+    void drawSearch(float avail);
+    void drawLog();
+    void drawSettings(float avail);
     void drawNav();
 
+    // Network actions (post jobs to the worker).
+    void loadLibrary();
+    void openPlaylist(int index);
+    void cancelTrackLoads();
+    void startSearch(const std::string& query);
+    void fetchCover(const std::string& url);
+    void playContext(const std::string& uri, uint32_t offset);
+    void playTrack(const std::string& uri);
+    void sendSeek(int ms);
+    void sendShuffle(bool on);
+    void sendRepeat(int mode);
+    void reportPlayerError(long status);
+
     // Cover art. placeholder_tex is the bundled default; cover_art_tex points at
-    // it until a real cover loads, and the old downloaded texture is freed on
-    // each change (the previous code leaked one GL texture per track).
+    // it until a real cover loads, and the old texture is freed on each change.
     GLuint placeholder_tex = 0;
     GLuint cover_art_tex = 0;
-    int cover_art_width = 0;
-    int cover_art_height = 0;
-    std::string loadedCoverUrl;
-    std::string pendingCoverUrl;
+    std::string coverUrl;          // url of the cover shown or being fetched
 
-    // Browse state
+    // Library
     std::vector<Playlist> playlists;
-    bool playlistsRequested = false;
-    bool rateLimited = false;
-    uint64_t backoffUntilUs = 0;
-    int backoffStep = 0;
+    LoadState libraryState = LoadState::NONE;
+    std::string libraryError;
+    int namesLeft = 0;             // names still being resolved (spinner)
+    int openIndex = -1;            // -1 = playlist list, else index into playlists
+    // Bumped to cancel an in-flight job: a job compares its captured value with
+    // the live one before each request and before delivering.
+    std::atomic<int> libraryGen{0};
+    std::atomic<int> tracksGen{0};
 
-    // Progressive playlist-name resolution. The spclient rootlist returns only
-    // playlist URIs; each name is a separate spclient fetch. namesPending walks
-    // one playlist per off-frame tick (nameCursor) so the UI never blocks on a
-    // burst of ~50 requests, then the completed list is cached to disk.
-    bool namesPending = false;
-    int nameCursor = 0;
-    int nameFailStreak = 0;   // abort the name burst if spclient is unreachable
-    void resolveNextName();
-
-    // Deferred network intents, set by the UI, run in runDeferred() off-frame.
-    bool wantPlaylists = false;
-    int wantTracks = -1;
-    std::string wantSearch;
-    bool wantPlay = false;
-    std::string wantPlayUri;
-    uint32_t wantPlayOffset = 0;
-    std::string wantPlayTrack;
-    int wantSeek = -1;
-    int wantShuffle = -1;
-    int wantRepeat = -1;
-    int wantVolume = -1;
-    std::vector<SearchTrack> searchResults;
+    // Search
     std::string searchQuery;
-    bool searchPending = false;   // spinner while a search request is in flight
+    std::vector<SearchTrack> searchResults;
+    LoadState searchState = LoadState::NONE;
+
+    // Log view: copied from the logger only when it changed.
+    std::string logCopy;
+    unsigned logVersion = ~0u;
+
     Tab tab = Tab::LIBRARY;
-    int openPlaylist = -1;   // -1 = playlist list, else index into playlists
 
     // Optimistic local mirrors of shuffle/repeat (set through the Web API;
     // Spotify routes the change back to this device via spirc).
     bool shuffleOn = false;
-    int repeatMode = 0;      // 0 off, 1 context, 2 track
+    int repeatMode = 0;            // 0 off, 1 context, 2 track
 
     // Scrubber / volume drag state (commit on release).
     bool scrubbing = false;

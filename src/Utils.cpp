@@ -19,6 +19,15 @@ void dbg_mark(const char *s) {
     }
 }
 
+bool loopback_mode() {
+    static int cached = -1;
+    if (cached < 0) {
+        SceIoStat st;
+        cached = sceIoGetstat("ux0:data/cspot/loopback", &st) >= 0 ? 1 : 0;
+    }
+    return cached == 1;
+}
+
 #define STB_IMAGE_IMPLEMENTATION
 #include "image/stb_image.h"
 
@@ -67,7 +76,7 @@ bool is_cover_cached(std::string url) {
     return sceIoGetstat(path.c_str(), &stat) == 0;
 }
 
-bool cache_cover_art(std::string url, uint8_t *buffer, uint32_t length) {
+bool cache_cover_art(std::string url, const uint8_t *buffer, uint32_t length) {
     std::string path = cover_art_path(url);
     int fd = sceIoOpen(path.c_str(), SCE_O_TRUNC | SCE_O_CREAT | SCE_O_WRONLY, 0666);
     if (fd < 0) {
@@ -79,7 +88,8 @@ bool cache_cover_art(std::string url, uint8_t *buffer, uint32_t length) {
     return true;
 }
 
-int download(const char *url, uint8_t **return_buffer, const char *method, std::string post_data, Headers headers) {
+int download(const char *url, uint8_t **return_buffer, const char *method, std::string post_data, Headers headers,
+             long *status) {
     CURL *curl_handle;
     CURLcode res;
 
@@ -109,6 +119,11 @@ int download(const char *url, uint8_t **return_buffer, const char *method, std::
     if (post_data.size() != 0) {
         curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, post_data.c_str());
         curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDSIZE, -1L);
+    } else if (strcmp(method, "GET") != 0) {
+        // A bodiless PUT (seek, shuffle, repeat) must still say
+        // "Content-Length: 0"; without it the Web API answers 411.
+        curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, "");
+        curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDSIZE, 0L);
     }
 
     struct curl_slist *headerchunk = NULL;
@@ -119,10 +134,13 @@ int download(const char *url, uint8_t **return_buffer, const char *method, std::
 
     // Perform the request
     res = curl_easy_perform(curl_handle);
-    int httpresponsecode = 0;
+    long httpresponsecode = 0;
     curl_easy_getinfo(curl_handle, CURLINFO_RESPONSE_CODE, &httpresponsecode);
-    if (httpresponsecode != 200) {
-        CSPOT_LOG(debug, "response code: %d", httpresponsecode);
+    if (httpresponsecode < 200 || httpresponsecode >= 300) {
+        CSPOT_LOG(debug, "response code: %ld", httpresponsecode);
+    }
+    if (status != NULL) {
+        *status = (res == CURLE_OK) ? httpresponsecode : 0;
     }
 
     if (res != CURLE_OK) {
@@ -146,7 +164,11 @@ int download(const char *url, uint8_t **return_buffer, const char *method, std::
 // not resolve hostname" under the burst and starved Mercury into a crash.
 static CURL *s_spclient_handle = NULL;
 
-int spclient_get(const char *url, const std::string &bearer, uint8_t **return_buffer) {
+int spclient_get(const char *url, const std::string &bearer, uint8_t **return_buffer, long *status,
+                 const char *accept) {
+    if (status != NULL) {
+        *status = 0;
+    }
     struct MemoryStruct chunk;
     chunk.memory = (char *) malloc(1);
     chunk.size = 0;
@@ -179,6 +201,10 @@ int spclient_get(const char *url, const std::string &bearer, uint8_t **return_bu
     struct curl_slist *hl = NULL;
     std::string auth = "Authorization: Bearer " + bearer;
     hl = curl_slist_append(hl, auth.c_str());
+    if (accept != NULL) {
+        std::string acc = std::string("Accept: ") + accept;
+        hl = curl_slist_append(hl, acc.c_str());
+    }
     curl_easy_setopt(h, CURLOPT_HTTPHEADER, hl);
 
     CURLcode res = curl_easy_perform(h);
@@ -193,6 +219,9 @@ int spclient_get(const char *url, const std::string &bearer, uint8_t **return_bu
 
     long status_code = 0;
     curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &status_code);
+    if (status != NULL) {
+        *status = status_code;
+    }
     if (status_code != 200) {
         CSPOT_LOG(error, "spclient_get HTTP error: %ld", status_code);
         free(chunk.memory);
@@ -274,6 +303,62 @@ bool LoadTextureFromMemory(const uint8_t* buffer, uint32_t length,
     *out_height = image_height;
 
     return true;
+}
+
+uint8_t *decode_image(const uint8_t *buf, size_t len, int max_side, int *w, int *h) {
+    int iw = 0, ih = 0;
+    unsigned char *px = stbi_load_from_memory(buf, static_cast<int>(len), &iw, &ih, NULL, 4);
+    if (px == NULL) {
+        return NULL;
+    }
+    int f = 1;
+    while (iw / f > max_side || ih / f > max_side) {
+        f++;
+    }
+    if (f == 1) {
+        *w = iw;
+        *h = ih;
+        return px;
+    }
+    // Box filter: a 640 px cover drawn at 190 px wastes VRAM and upload time.
+    int ow = iw / f, oh = ih / f;
+    uint8_t *out = static_cast<uint8_t *>(malloc(static_cast<size_t>(ow) * oh * 4));
+    if (out == NULL) {
+        stbi_image_free(px);
+        return NULL;
+    }
+    for (int y = 0; y < oh; y++) {
+        for (int x = 0; x < ow; x++) {
+            unsigned acc[4] = {0, 0, 0, 0};
+            for (int dy = 0; dy < f; dy++) {
+                const uint8_t *src = px + (static_cast<size_t>(y * f + dy) * iw + x * f) * 4;
+                for (int dx = 0; dx < f; dx++) {
+                    for (int c = 0; c < 4; c++) acc[c] += src[dx * 4 + c];
+                }
+            }
+            uint8_t *dst = out + (static_cast<size_t>(y) * ow + x) * 4;
+            for (int c = 0; c < 4; c++) dst[c] = static_cast<uint8_t>(acc[c] / (f * f));
+        }
+    }
+    stbi_image_free(px);
+    *w = ow;
+    *h = oh;
+    return out;
+}
+
+GLuint texture_from_rgba(const uint8_t *rgba, int w, int h) {
+    if (rgba == NULL || w <= 0 || h <= 0) {
+        return 0;
+    }
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    return tex;
 }
 
 int is_dir(const char *path) {

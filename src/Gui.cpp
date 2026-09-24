@@ -4,9 +4,14 @@
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/processmgr.h>
 #include <cstdint>
+#include <cfloat>
 #include <cstdio>
+#include <string>
 #include <Logger.h>
+#include "DevKit.h"
 #include "GuiUtils.h"
+#include "Input.h"
+#include "Keyboard.h"
 #include "Utils.h"
 #include "Font.h"
 #include "PlaybackScreen.h"
@@ -66,8 +71,10 @@ void applySpotifyTheme() {
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 0.0f;
     style.WindowBorderSize = 0.0f;
+    style.ChildBorderSize = 0.0f;
     style.FrameRounding = 4.0f;
     style.ScrollbarRounding = 4.0f;
+    style.ScrollbarSize = 10.0f;
     style.WindowPadding = ImVec2(16.0f, 16.0f);
     style.ItemSpacing = ImVec2(12.0f, 10.0f);
 
@@ -84,8 +91,8 @@ void applySpotifyTheme() {
     c[ImGuiCol_Text]             = ImVec4(1, 1, 1, 1);
     c[ImGuiCol_TextDisabled]     = grey;
     c[ImGuiCol_Button]           = card;
-    c[ImGuiCol_ButtonHovered]    = elev;
-    c[ImGuiCol_ButtonActive]     = green;
+    c[ImGuiCol_ButtonHovered]    = card;
+    c[ImGuiCol_ButtonActive]     = ImVec4(0.24f, 0.24f, 0.24f, 1.00f);
     c[ImGuiCol_FrameBg]          = card;
     c[ImGuiCol_FrameBgHovered]   = elev;
     c[ImGuiCol_FrameBgActive]    = card;
@@ -97,6 +104,7 @@ void applySpotifyTheme() {
     c[ImGuiCol_CheckMark]        = green;
     c[ImGuiCol_ScrollbarBg]      = ImVec4(0, 0, 0, 0);
     c[ImGuiCol_ScrollbarGrab]    = card;
+    c[ImGuiCol_NavHighlight]     = green;
 }
 
 }  // namespace
@@ -105,28 +113,31 @@ void GUI::init() {
     // 4X MSAA: wasteful for a flat UI, but it is the exact init the app has
     // years of on-device proof with (incl. the patched vitaGL toolchain build).
     // Switch to NONE only after verifying it boots on hardware -- the init path
-    // is too fragile to change blind (see the black-screen history above).
+    // is too fragile to change blind.
     vglInitExtended(0, 960, 544, 0x800000, SCE_GXM_MULTISAMPLE_4X);
 
-    // imgui-vita derives io.DisplaySize from the live GL viewport inside NewFrame
-    // and skips all rendering when it is 0; current vitaGL doesn't seed one, so
-    // set it here and again every rendered frame.
+    // vitaGL doesn't seed a viewport; set it here and again every frame.
     glViewport(0, 0, 960, 544);
     glScissor(0, 0, 960, 544);
 
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
+    // Init allocates the backend's vertex pools. Input and frame setup are ours
+    // (Input::new_frame); the backend only renders.
     ImGui_ImplVitaGL_Init();
-    io.MouseDrawCursor = false;
+    ImGui_ImplVitaGL_TouchUsage(false);
+    ImGui_ImplVitaGL_GamepadUsage(false);
+    ImGui_ImplVitaGL_MouseStickUsage(false);
+    io.IniFilename = NULL;   // no imgui.ini written next to the app
 
     font = AddDefaultFont(26);
-    log_font = AddDefaultFont(12);
+    log_font = AddDefaultFont(14);
 
     static const ImWchar latin[] = { 0x0020, 0x017F, 0 };
     font_bold = io.Fonts->AddFontFromFileTTF("app0:PlusJakartaSans-Bold.ttf", 30.0f, NULL, latin);
 
-    ImWchar playback_ranges[] = { 0xf144, 0xf144, 0xf28b, 0xf28b, 0 };
-    ImWchar ranges[] = {
+    static const ImWchar playback_ranges[] = { 0xf144, 0xf144, 0xf28b, 0xf28b, 0 };
+    static const ImWchar ranges[] = {
         0xf048, 0xf048,  // backward
         0xf051, 0xf051,  // forward
         0xf013, 0xf013,  // cog
@@ -141,28 +152,82 @@ void GUI::init() {
     icon_font = io.Fonts->AddFontFromFileTTF(FONT_ICON_FILE_NAME_FAS, 40.0f, NULL, ranges);
     playback_icon_font = io.Fonts->AddFontFromFileTTF(FONT_ICON_FILE_NAME_FAS, 58.0f, NULL, playback_ranges);
     io.Fonts->Build();
+    // The backend created the font texture lazily in its NewFrame, which we no
+    // longer call.
+    ImGui_ImplVitaGL_CreateDeviceObjects();
 
     applySpotifyTheme();
+    Input::init();
 
-    ImGui_ImplVitaGL_TouchUsage(true);
-    ImGui_ImplVitaGL_UseIndirectFrontTouch(false);
-    ImGui_ImplVitaGL_UseRearTouch(false);
-    ImGui_ImplVitaGL_GamepadUsage(true);
-    ImGui_ImplVitaGL_MouseStickUsage(false);
+    net.start();
 
     login_screen = new LoginScreen(this);
     playback_screen = new PlaybackScreen(this);
 }
 
-void GUI::start() {
-    sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
-    sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, SCE_TOUCH_SAMPLING_STATE_START);
+void GUI::toast(const std::string &msg) {
+    toastText = msg;
+    toastUntilUs = sceKernelGetProcessTimeWide() + 3500000;
+}
 
+void GUI::drawToast() {
+    if (toastText.empty() || sceKernelGetProcessTimeWide() >= toastUntilUs) {
+        return;
+    }
+    const float wrap = 760.0f;
+    ImDrawList *dl = ImGui::GetOverlayDrawList();
+    ImVec2 ts = font->CalcTextSizeA(font->FontSize, FLT_MAX, wrap, toastText.c_str());
+    ImVec2 pad(20.0f, 12.0f);
+    ImVec2 size(ts.x + pad.x * 2.0f, ts.y + pad.y * 2.0f);
+    ImVec2 p0((960.0f - size.x) * 0.5f, 544.0f - size.y - 24.0f);
+    dl->AddRectFilled(p0, ImVec2(p0.x + size.x, p0.y + size.y), IM_COL32(48, 48, 48, 245), 10.0f);
+    dl->AddText(font, font->FontSize, ImVec2(p0.x + pad.x, p0.y + pad.y),
+                IM_COL32(255, 255, 255, 255), toastText.c_str(), NULL, wrap);
+}
+
+std::string GUI::debugState() {
+    Screen *current = screen.load();
+    const char *name = current == nullptr ? "none"
+                     : current == login_screen ? "login"
+                     : current == playback_screen ? "playback" : "other";
+    PlayerModel::Snapshot snap = player.snapshot();
+    std::string toastNow = sceKernelGetProcessTimeWide() < toastUntilUs ? toastText : "";
+    std::string out = "{\"screen\":" + json_quote(name) +
+        ",\"app_paused\":" + (paused ? "true" : "false") +
+        ",\"cspot\":" + (cspot_started ? "true" : "false") +
+        ",\"token\":" + (api.has_token() ? "true" : "false") +
+        ",\"net_busy\":" + (net.busy() ? "true" : "false") +
+        ",\"keyboard\":" + (Keyboard::Active() ? "true" : "false") +
+        ",\"toast\":" + json_quote(toastNow) +
+        ",\"track\":{\"name\":" + json_quote(snap.name) +
+        ",\"artist\":" + json_quote(snap.artist) +
+        ",\"album\":" + json_quote(snap.album) +
+        ",\"position_ms\":" + std::to_string(snap.positionMs) +
+        ",\"duration_ms\":" + std::to_string(snap.durationMs) +
+        ",\"paused\":" + (snap.paused ? "true" : "false") +
+        ",\"volume\":" + std::to_string(snap.volume) + "}" +
+        ",\"view\":" + (current ? current->debugState() : std::string("{}")) + "}";
+    return out;
+}
+
+bool GUI::debugCommand(const std::string &cmd, const std::string &arg) {
+    if (cmd == "toast") {
+        toast(arg);
+        return true;
+    }
+    Screen *current = screen.load();
+    return current != nullptr && current->debugCommand(cmd, arg);
+}
+
+void GUI::start() {
     InputSnapshot prev = sampleInput();
     int wake = WAKE_FRAMES;
     uint64_t last_present = 0;
 
     while (isRunning) {
+        // Debug server requests are answered even while backgrounded.
+        bool devkit = DevKit::pump(this);
+
         // Backgrounded: the system owns the display. Idle WITHOUT an open ImGui
         // frame so we never hold the GPU mid-frame (that wedges SceGxm).
         if (paused) {
@@ -170,42 +235,48 @@ void GUI::start() {
             continue;
         }
 
+        // Finished network jobs apply their results here, between frames.
+        bool changed = net.drainResults() || devkit;
+        static_cast<PlaybackScreen*>(playback_screen)->tick();
+
         uint64_t now = sceKernelGetProcessTimeWide();
         InputSnapshot cur = sampleInput();
-        if (cur != prev || inputActive(cur)) {
+        bool dialog = Keyboard::Active();
+        if (cur != prev || inputActive(cur) || changed || dialog || Input::animating()) {
             wake = WAKE_FRAMES;
         }
         prev = cur;
 
         // Interaction: render every vsync'd frame (60 fps). Static UI: drop to
-        // ~10 fps full rebuilds. A full (cheap) rebuild instead of re-presenting
-        // cached ImDrawData keeps us correct with any imgui backend, and still
-        // kills the 60 fps busy loop that burned the battery.
+        // ~10 fps full rebuilds (spinners and the scrubber still move).
         if (wake > 0 || (now - last_present) >= IDLE_FRAME_US) {
             glViewport(0, 0, 960, 544);
             glScissor(0, 0, 960, 544);
-            ImGui_ImplVitaGL_NewFrame();
-            ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Once);
-            ImGui::SetNextWindowSize(ImVec2(960.0f, 544.0f), ImGuiCond_Once);
-            if (ImGui::Begin("psvitify", nullptr, WINDOW_FLAGS)) {
+            // While the IME is up it owns the touch screen and the buttons.
+            Input::new_frame(!dialog);
+            ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(960.0f, 544.0f), ImGuiCond_Always);
+            if (ImGui::Begin("psvitify", nullptr, WINDOW_FLAGS | ImGuiWindowFlags_NoScrollbar |
+                                                  ImGuiWindowFlags_NoScrollWithMouse |
+                                                  ImGuiWindowFlags_NoBringToFrontOnFocus)) {
                 Screen *current = screen.load();
                 if (current) {
                     current->draw();
                 }
-                ImGui::End();
             }
+            ImGui::End();
+            drawToast();
             ImGui::Render();
             glClearColor(0.07f, 0.07f, 0.07f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
             ImGui_ImplVitaGL_RenderDrawData(ImGui::GetDrawData());
-            vglSwapBuffers(GL_FALSE);
+            // GL_TRUE lets the system draw its common dialog (IME) over us.
+            vglSwapBuffers(dialog ? GL_TRUE : GL_FALSE);
+            if (dialog) {
+                Keyboard::Poll();
+            }
             last_present = now;
             if (wake > 0) wake--;
-            // Frame is closed: safe point for ALL blocking network the UI queued
-            // (cover art, playlists, tracks, search, play/seek/shuffle/volume).
-            // Running it here (post-swap, no open frame) means a slow request
-            // pauses the loop but never holds the GPU mid-frame -> no SceGxm wedge.
-            ((PlaybackScreen*) playback_screen)->runDeferred();
         } else {
             uint64_t nap = MAX_NAP_US;
             uint64_t until_frame = last_present + IDLE_FRAME_US - now;

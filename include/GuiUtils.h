@@ -4,10 +4,6 @@
 #include <vitaGL.h>
 #include <string>
 
-#define INPUT_USED_COLOR              IM_COL32(190, 190, 190, 255)
-#define INPUT_HINT_COLOR              IM_COL32(82, 82, 82, 255)
-#define TEXT_INPUT_BACKGROUND         IM_COL32(20, 20, 20, 255)
-#define TEXT_INPUT_BACKGROUND_HOVERED IM_COL32(20, 20, 20, 255)
 #define PLAY_BUTTON_BACKGROUND        IM_COL32(255, 255, 255, 255)
 #define SPOTIFY_GREEN                 IM_COL32(30, 215, 96, 255)   // #1ED760
 #define BACKGROUND_COLOR              ImVec4(0.07f, 0.07f, 0.07f, 1.00f)  // #121212
@@ -15,36 +11,21 @@
                                      | ImGuiWindowFlags_NoMove          \
                                      | ImGuiWindowFlags_NoResize        \
                                      | ImGuiWindowFlags_NoCollapse)
-#define MENU_BUTTON_SIZE              ImVec2(68.0f, 68.0f)
 
-#define MAX_CREDENTIAL_LEN            256
-
-class TextInput {
- public:
-    TextInput() {}
-    TextInput(ImVec2 text_align, float align, const char *prompt, const char *hint, bool password = false)
-     : text_align(text_align), align(align), prompt(prompt), hint(hint), password(password) {
-        strncpy(buffer, hint, MAX_CREDENTIAL_LEN);
-    }
-    void draw(ImVec2 size);
-    char buffer[MAX_CREDENTIAL_LEN];
-    bool password;
-    bool set = false;
-    ImVec2 text_align;
-    float align;
-    const char *prompt;
-    const char *hint;
-};
-
-// ImGUI helper functions
-bool getScrollToBottom();
-void setScrollToBottom(bool v);
-bool ButtonCenteredOnLine(const char* label, float alignment, ImVec2 btn_size);
+// ImGui helper functions
 ImFont* AddDefaultFont(float pixel_size);
 bool StyleButton(const char* label, ImVec2 btn_size, bool active = false);
 void AlignForWidth(float width, float alignment = 0.5f);
-void TextCentered(std::string text);
-ImGuiTextBuffer *getBuf();
+void TextCentered(const std::string& text);
+
+// Logger. Written from every thread (cspot, net, GUI), read by the GUI thread.
+// The on-screen copy keeps the last LOG_KEEP_BYTES; the file keeps everything.
 void init_logger();
 void flush_logger();
+// Copies the log into *out if it changed since *version; returns true if so.
+bool log_snapshot(std::string *out, unsigned *version);
+// Last `bytes` of the in-memory log (debug server).
+std::string log_tail(size_t bytes);
 
+// JSON string literal (quotes included) for the debug server's state dumps.
+std::string json_quote(const std::string &s);

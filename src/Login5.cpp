@@ -341,7 +341,10 @@ std::string buildLoginRequest(const std::string &clientId, const std::string &de
 
 std::string login5_get_access_token(const std::string &clientId, const std::string &deviceId,
                                     const std::string &userAgent, const std::string &username,
-                                    const std::vector<uint8_t> &authData) {
+                                    const std::vector<uint8_t> &authData, int *expiresInS) {
+    if (expiresInS != nullptr) {
+        *expiresInS = 0;
+    }
     if (username.empty() || authData.empty()) {
         CSPOT_LOG(error, "login5: missing stored credentials");
         return "";
@@ -398,6 +401,8 @@ std::string login5_get_access_token(const std::string &clientId, const std::stri
                 while (ok.next(okf)) {
                     if (okf.field == 2 && okf.wire == 2) {  // access_token
                         accessToken.assign((const char *)okf.data, okf.len);
+                    } else if (okf.field == 4 && okf.wire == 0 && expiresInS != nullptr) {
+                        *expiresInS = (int)okf.val;  // access_token_expires_in
                     }
                 }
             } else if (f.field == 2 && f.wire == 0) {  // error

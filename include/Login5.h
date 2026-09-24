@@ -14,9 +14,11 @@
 // the LoginBlob.
 //
 // Returns the bearer token string, or an empty string on any failure (the app
-// stays usable as a phone-controlled Connect target without it).
+// stays usable as a phone-controlled Connect target without it). *expiresInS
+// (optional) receives the token lifetime in seconds, 0 if not reported.
 std::string login5_get_access_token(const std::string &clientId,
                                     const std::string &deviceId,
                                     const std::string &userAgent,
                                     const std::string &username,
-                                    const std::vector<uint8_t> &authData);
+                                    const std::vector<uint8_t> &authData,
+                                    int *expiresInS = nullptr);

@@ -2,15 +2,24 @@
 #include "Font.h"
 #include "Gui.h"
 #include "GuiUtils.h"
+#include "Input.h"
 #include "Keyboard.h"
 #include "Utils.h"
 #include "Config.h"
+#include <psp2/ctrl.h>
+#include <psp2/io/dirent.h>
+#include <psp2/io/fcntl.h>
 #include <JSONObject.h>
+#include <Logger.h>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -18,10 +27,47 @@ const ImU32 COL_TRACK  = IM_COL32(83, 83, 83, 255);    // #535353
 const ImU32 COL_WHITE  = IM_COL32(255, 255, 255, 255);
 const ImU32 COL_GREENV = IM_COL32(30, 215, 96, 255);   // #1ED760
 const ImU32 COL_GREY   = IM_COL32(179, 179, 179, 255);  // #B3B3B3
+const ImU32 COL_DIM    = IM_COL32(110, 110, 110, 255);
 const ImU32 COL_CLEAR  = IM_COL32(0, 0, 0, 0);
+const ImU32 COL_ROW_HI = IM_COL32(40, 40, 40, 255);
 
-// Flat icon button with explicit glyph/background colors (StyleButton's
-// active/inactive palette does not fit the Spotify transport row).
+const char *PLAYLIST_CACHE_PATH = "ux0:data/cspot/playlists.json";
+const char *COVER_CACHE_DIR = "ux0:data/cspot/cache";
+const int COVER_MAX_SIDE = 256;
+const int COVER_CACHE_MAX_FILES = 400;
+// Consecutive spclient failures before a name/metadata burst gives up: past
+// that the network is down and grinding on only starves Mercury.
+const int MAX_FAIL_STREAK = 5;
+// Rows delivered to the GUI per batch while metadata streams in.
+const int TRACK_BATCH = 6;
+
+const char *stateName(LoadState s) {
+    switch (s) {
+        case LoadState::NONE: return "none";
+        case LoadState::LOADING: return "loading";
+        case LoadState::LOADED: return "loaded";
+        case LoadState::FAILED: return "failed";
+    }
+    return "?";
+}
+
+std::string describeStatus(long status) {
+    switch (status) {
+        case 0:   return "No connection to Spotify. Check the Wi-Fi.";
+        case 401: return "Spotify session expired. Restart the app.";
+        case 403: return "Spotify refused this action (Premium required).";
+        case 404: return "Spotify does not see psvitify as active yet. Start playback once from your phone.";
+        case 429: return "Spotify is rate limiting this app. Try again in a minute.";
+        default:  return "Spotify error " + std::to_string(status) + ".";
+    }
+}
+
+std::string idFromUri(const std::string &uri, const char *prefix) {
+    size_t n = strlen(prefix);
+    return uri.compare(0, n, prefix) == 0 ? uri.substr(n) : uri;
+}
+
+// Flat icon button with explicit glyph/background colors.
 bool iconButton(const char* label, ImVec2 size, ImU32 fg, ImU32 bg) {
     ImGui::PushStyleColor(ImGuiCol_Button, bg);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, bg);
@@ -32,15 +78,38 @@ bool iconButton(const char* label, ImVec2 size, ImU32 fg, ImU32 bg) {
     return r;
 }
 
-// Full-width, left-aligned list row (Spotify list style).
-bool listRow(const char* label, float width, ImU32 fg, float height = 48.0f) {
-    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
-    ImGui::PushStyleColor(ImGuiCol_Button, COL_CLEAR);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(40, 40, 40, 255));
+// Full-width list row: title, optional grey subtitle, highlight while pressed.
+// Text is clipped to the row instead of spilling into the next column.
+bool listRow(const char *id, const std::string &title, const std::string &subtitle,
+             float width, ImU32 fg, ImFont *subFont) {
+    const float h = subtitle.empty() ? 50.0f : 60.0f;
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    bool clicked = ImGui::InvisibleButton(id, ImVec2(width, h));
+    bool held = ImGui::IsItemActive();
+    bool focused = ImGui::IsItemFocused();
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    if (held || focused) {
+        dl->AddRectFilled(p, ImVec2(p.x + width, p.y + h), COL_ROW_HI, 6.0f);
+    }
+    ImVec4 clip(p.x + 8.0f, p.y, p.x + width - 8.0f, p.y + h);
+    ImFont *font = ImGui::GetFont();
+    float ty = subtitle.empty() ? p.y + (h - font->FontSize) * 0.5f : p.y + 6.0f;
+    dl->AddText(font, font->FontSize, ImVec2(p.x + 8.0f, ty), fg, title.c_str(), NULL, 0.0f, &clip);
+    if (!subtitle.empty()) {
+        dl->AddText(subFont, subFont->FontSize, ImVec2(p.x + 8.0f, p.y + 8.0f + font->FontSize),
+                    COL_GREY, subtitle.c_str(), NULL, 0.0f, &clip);
+    }
+    return clicked;
+}
+
+bool pillButton(const char *label, ImVec2 size, ImU32 bg, ImU32 fg) {
+    ImGui::PushStyleColor(ImGuiCol_Button, bg);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, bg);
     ImGui::PushStyleColor(ImGuiCol_Text, fg);
-    bool r = ImGui::Button(label, ImVec2(width, height));
-    ImGui::PopStyleColor(3);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, size.y * 0.5f);
+    bool r = ImGui::Button(label, size);
     ImGui::PopStyleVar();
+    ImGui::PopStyleColor(3);
     return r;
 }
 
@@ -56,8 +125,7 @@ std::string fmtTime(int ms) {
 
 // Touch/mouse horizontal bar. Draws a track + fill (+ optional knob) and returns
 // true while held, writing the live held fraction (0..1) to *outFrac. Commit is
-// left to the caller (on the held->released transition) so a drag shows live and
-// the seek/volume action only fires once, on release.
+// the caller's job, on release.
 bool barControl(const char* id, float value, ImVec2 size,
                 ImU32 fill, bool knob, float* outFrac) {
     ImGuiIO& io = ImGui::GetIO();
@@ -68,58 +136,55 @@ bool barControl(const char* id, float value, ImVec2 size,
     float frac = value;
     if (held) {
         frac = (io.MousePos.x - p.x) / size.x;
-        if (frac < 0.0f) frac = 0.0f;
-        if (frac > 1.0f) frac = 1.0f;
-        *outFrac = frac;
+        *outFrac = frac < 0.0f ? 0.0f : (frac > 1.0f ? 1.0f : frac);
     }
     if (frac < 0.0f) frac = 0.0f;
     if (frac > 1.0f) frac = 1.0f;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     float cy = p.y + size.y * 0.5f;
-    float h = 5.0f;
+    float h = held ? 7.0f : 5.0f;
     dl->AddRectFilled(ImVec2(p.x, cy - h * 0.5f),
                       ImVec2(p.x + size.x, cy + h * 0.5f), COL_TRACK, h * 0.5f);
     dl->AddRectFilled(ImVec2(p.x, cy - h * 0.5f),
                       ImVec2(p.x + size.x * frac, cy + h * 0.5f), fill, h * 0.5f);
-    if (knob) {
-        dl->AddCircleFilled(ImVec2(p.x + size.x * frac, cy), 8.0f, fill);
+    if (knob || held) {
+        dl->AddCircleFilled(ImVec2(p.x + size.x * frac, cy), held ? 11.0f : 8.0f, fill);
     }
     ImGui::PopID();
     return held;
 }
 
-// Spinning arc + label, drawn inline. The heavy network runs off-frame (after
-// the swap), so during a blocking curl the last frame stays on screen frozen;
-// a visible spinner on that frame at least tells the user "working", instead of
-// a dead still image with no feedback. When ticks are frequent (progressive
-// name/track resolution) it actually animates.
-void Spinner(const char* label, ImU32 col) {
+// Spinning arc + label, drawn inline.
+void Spinner(const char* label) {
     ImVec2 p = ImGui::GetCursorScreenPos();
     float r = 9.0f;
-    float cx = p.x + r, cy = p.y + r + 2.0f;
+    float cx = p.x + r, cy = p.y + r + 4.0f;
     float t = static_cast<float>(ImGui::GetTime());
     float a0 = t * 6.0f;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->PathClear();
     dl->PathArcTo(ImVec2(cx, cy), r, a0, a0 + 4.2f, 24);
-    dl->PathStroke(col, false, 2.5f);
+    dl->PathStroke(COL_GREENV, false, 2.5f);
     ImGui::Dummy(ImVec2(r * 2.0f + 6.0f, r * 2.0f + 4.0f));
     if (label && *label) {
         ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(179, 179, 179, 255));
-        ImGui::AlignTextToFramePadding();
+        ImGui::PushStyleColor(ImGuiCol_Text, COL_GREY);
         ImGui::TextUnformatted(label);
         ImGui::PopStyleColor();
     }
 }
 
-// Playlist list is cached to disk so a relaunch shows the library instantly
-// with ZERO network. The keymaster client_id is globally rate-limited, so
-// re-fetching on every launch is what triggers the permanent 429 storm; fetch
-// once, persist, and only refresh on explicit user request.
-const char* PLAYLIST_CACHE_PATH = "ux0:data/cspot/playlists.json";
+void greyText(const std::string &text) {
+    ImGui::PushStyleColor(ImGuiCol_Text, COL_GREY);
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextUnformatted(text.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+}
 
+// The playlist list is cached so a relaunch shows the library instantly with
+// zero network.
 std::vector<Playlist> loadPlaylistCache() {
     std::vector<Playlist> out;
     FILE* f = fopen(PLAYLIST_CACHE_PATH, "rb");
@@ -142,8 +207,10 @@ std::vector<Playlist> loadPlaylistCache() {
             cJSON* ur = cJSON_GetObjectItem(it, "uri");
             if (cJSON_IsString(nm) && nm->valuestring &&
                 cJSON_IsString(ur) && ur->valuestring) {
-                out.push_back({std::string(nm->valuestring),
-                               std::string(ur->valuestring), {}, false});
+                Playlist p;
+                p.name = nm->valuestring;
+                p.uri = ur->valuestring;
+                out.push_back(std::move(p));
             }
         }
     }
@@ -170,30 +237,65 @@ void savePlaylistCache(const std::vector<Playlist>& pls) {
     free(txt);
 }
 
+bool readWholeFile(const std::string &path, std::string *out) {
+    FILE *f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+    char buf[8192];
+    size_t n;
+    out->clear();
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out->append(buf, n);
+    fclose(f);
+    return !out->empty();
+}
+
+// Keeps the cover cache bounded: past the limit it is simply emptied (covers
+// are re-downloaded on demand, and sorting by age would cost a stat per file).
+void pruneCoverCache() {
+    SceUID d = sceIoDopen(COVER_CACHE_DIR);
+    if (d < 0) return;
+    std::vector<std::string> names;
+    SceIoDirent e;
+    while (sceIoDread(d, &e) > 0) {
+        if (!SCE_S_ISDIR(e.d_stat.st_mode)) names.push_back(e.d_name);
+    }
+    sceIoDclose(d);
+    if (static_cast<int>(names.size()) <= COVER_CACHE_MAX_FILES) return;
+    for (const auto &n : names) {
+        sceIoRemove((std::string(COVER_CACHE_DIR) + "/" + n).c_str());
+    }
+    CSPOT_LOG(info, "cover cache pruned (%d files)", static_cast<int>(names.size()));
+}
+
 // Minimal protobuf wire reader: collect every length-delimited (wire type 2)
-// field numbered `want` inside [p,end). Enough to walk the playlist4
-// SelectedListContent message (nested length-delimited submessages) without
-// generating a new nanopb proto. Field numbers verified against live responses:
-//   rootlist:  contents=5 -> items=3(repeated) -> Item.uri=1
-//   detail:    attributes=3 -> ListAttributes.name=1
+// field numbered `want` inside [p,end). Enough to walk playlist4 and metadata
+// messages without generating nanopb code. Field numbers:
+//   SelectedListContent: attributes=3 (ListAttributes.name=1), contents=5
+//   ListItems.items=3, Item.uri=1
+//   metadata Track: name=2, artist=4 (Artist.name=2)
 std::vector<std::pair<const uint8_t*, size_t>> pbLenFields(
         const uint8_t* p, const uint8_t* end, int want) {
     std::vector<std::pair<const uint8_t*, size_t>> out;
     while (p < end) {
         uint64_t key = 0; int sh = 0; bool ok = false;
-        while (p < end) { uint8_t b = *p++; 
-                          if (sh >= 64) { ok = false; break; }
-                          key |= static_cast<uint64_t>(b & 0x7F) << sh;
-                          if (!(b & 0x80)) { ok = true; break; } sh += 7; }
+        while (p < end) {
+            uint8_t b = *p++;
+            if (sh >= 64) { ok = false; break; }
+            key |= static_cast<uint64_t>(b & 0x7F) << sh;
+            if (!(b & 0x80)) { ok = true; break; }
+            sh += 7;
+        }
         if (!ok) break;
         int field = static_cast<int>(key >> 3), wt = static_cast<int>(key & 7);
         if (wt == 2) {
             uint64_t len = 0; sh = 0; ok = false;
-            while (p < end) { uint8_t b = *p++; 
-                              if (sh >= 64) { ok = false; break; }
-                              len |= static_cast<uint64_t>(b & 0x7F) << sh;
-                              if (!(b & 0x80)) { ok = true; break; } sh += 7; }
-            if (!ok || len > static_cast<size_t>(end - p)) break;
+            while (p < end) {
+                uint8_t b = *p++;
+                if (sh >= 64) { ok = false; break; }
+                len |= static_cast<uint64_t>(b & 0x7F) << sh;
+                if (!(b & 0x80)) { ok = true; break; }
+                sh += 7;
+            }
+            if (!ok || len > static_cast<uint64_t>(end - p)) break;
             if (field == want) out.push_back({p, static_cast<size_t>(len)});
             p += len;
         } else if (wt == 0) {
@@ -206,47 +308,86 @@ std::vector<std::pair<const uint8_t*, size_t>> pbLenFields(
     return out;
 }
 
-// Playlist ids (base62, after "spotify:playlist:") from a rootlist protobuf.
-std::vector<std::string> parseRootlist(const uint8_t* data, size_t len) {
-    std::vector<std::string> ids;
-    const uint8_t* end = data + len;
-    auto contents = pbLenFields(data, end, 5);       // SelectedListContent.contents
-    if (contents.empty()) return ids;
-    auto items = pbLenFields(contents[0].first, contents[0].first + contents[0].second, 3);
-    const std::string pre = "spotify:playlist:";
-    for (auto& it : items) {
-        auto uris = pbLenFields(it.first, it.first + it.second, 1);   // Item.uri
-        if (uris.empty()) continue;
-        std::string uri(reinterpret_cast<const char*>(uris[0].first), uris[0].second);
-        if (uri.rfind(pre, 0) == 0) ids.push_back(uri.substr(pre.size()));
-    }
-    return ids;
+std::string pbString(const std::pair<const uint8_t*, size_t> &f) {
+    return std::string(reinterpret_cast<const char*>(f.first), f.second);
 }
 
-// Display name from a playlist detail protobuf ("" if absent, e.g. HTTP 400 on
-// editorial 37i9... playlists whose detail endpoint rejects the request).
-std::string parsePlaylistName(const uint8_t* data, size_t len) {
-    const uint8_t* end = data + len;
-    auto attrs = pbLenFields(data, end, 3);          // SelectedListContent.attributes
+// Item URIs of a SelectedListContent (rootlist or playlist), in order.
+std::vector<std::string> parseListUris(const std::string &body, size_t limit) {
+    std::vector<std::string> uris;
+    const uint8_t *data = reinterpret_cast<const uint8_t*>(body.data());
+    auto contents = pbLenFields(data, data + body.size(), 5);
+    if (contents.empty()) return uris;
+    auto items = pbLenFields(contents[0].first, contents[0].first + contents[0].second, 3);
+    for (auto &it : items) {
+        if (uris.size() >= limit) break;
+        auto u = pbLenFields(it.first, it.first + it.second, 1);
+        uris.push_back(u.empty() ? std::string() : pbString(u[0]));
+    }
+    return uris;
+}
+
+// Display name of a SelectedListContent ("" if absent).
+std::string parseListName(const std::string &body) {
+    const uint8_t *data = reinterpret_cast<const uint8_t*>(body.data());
+    auto attrs = pbLenFields(data, data + body.size(), 3);
     if (attrs.empty()) return "";
     auto names = pbLenFields(attrs[0].first, attrs[0].first + attrs[0].second, 1);
-    if (names.empty()) return "";
-    return std::string(reinterpret_cast<const char*>(names[0].first), names[0].second);
+    return names.empty() ? "" : pbString(names[0]);
+}
+
+void parseTrackMeta(const std::string &body, std::string *name, std::string *artist) {
+    const uint8_t *data = reinterpret_cast<const uint8_t*>(body.data());
+    const uint8_t *end = data + body.size();
+    auto n = pbLenFields(data, end, 2);
+    if (!n.empty()) *name = pbString(n[0]);
+    auto artists = pbLenFields(data, end, 4);
+    for (auto &a : artists) {
+        auto an = pbLenFields(a.first, a.first + a.second, 2);
+        if (an.empty()) continue;
+        if (!artist->empty()) *artist += ", ";
+        *artist += pbString(an[0]);
+    }
+}
+
+std::string jsonStr(cJSON *o, const char *key) {
+    cJSON *v = cJSON_GetObjectItem(o, key);
+    return (cJSON_IsString(v) && v->valuestring) ? std::string(v->valuestring) : std::string();
+}
+
+std::string jsonArtists(cJSON *track) {
+    std::string out;
+    cJSON *artists = cJSON_GetObjectItem(track, "artists");
+    int n = cJSON_IsArray(artists) ? cJSON_GetArraySize(artists) : 0;
+    for (int i = 0; i < n && i < 3; i++) {
+        std::string a = jsonStr(cJSON_GetArrayItem(artists, i), "name");
+        if (a.empty()) continue;
+        if (!out.empty()) out += ", ";
+        out += a;
+    }
+    return out;
+}
+
+int findPlaylist(const std::vector<Playlist> &pls, const std::string &uri) {
+    for (size_t i = 0; i < pls.size(); i++) {
+        if (pls[i].uri == uri) return static_cast<int>(i);
+    }
+    return -1;
 }
 
 }  // namespace
 
 PlaybackScreen::PlaybackScreen(GUI *gui) : Screen(gui) {
-    LoadTextureFromFile("app0:cover_art.png", &placeholder_tex, &cover_art_width, &cover_art_height);
+    int w = 0, h = 0;
+    LoadTextureFromFile("app0:cover_art.png", &placeholder_tex, &w, &h);
     cover_art_tex = placeholder_tex;
 
-    // Restore the cached playlist list: instant, no network. Marking the fetch
-    // as already done stops the auto-fetch on the first Library visit (that is
-    // what rate-limits the app on every launch).
+    // Cached playlists: the library shows instantly, no network at boot.
     playlists = loadPlaylistCache();
     if (!playlists.empty()) {
-        playlistsRequested = true;
+        libraryState = LoadState::LOADED;
     }
+    gui->net.post([] { pruneCoverCache(); });
 }
 
 PlaybackScreen::~PlaybackScreen() {
@@ -258,127 +399,355 @@ PlaybackScreen::~PlaybackScreen() {
     }
 }
 
-void PlaybackScreen::processPendingCover() {
-    if (pendingCoverUrl.empty()) {
-        return;
+void PlaybackScreen::tick() {
+    PlayerModel::Snapshot snap = gui->player.snapshot();
+    if (!snap.imageUrl.empty() && snap.imageUrl != coverUrl) {
+        fetchCover(snap.imageUrl);
     }
-    std::string url = pendingCoverUrl;
-    pendingCoverUrl.clear();
-    setCoverArt(url);
-}
-
-// Off-frame executor: every blocking curl call the UI queued runs here, AFTER
-// the swap, so the GPU is never held mid-frame. One action per call keeps the
-// per-frame pause bounded to a single request.
-void PlaybackScreen::runDeferred() {
-    processPendingCover();
-
-    // User-initiated actions first (one per frame so the pause stays bounded),
-    // then the background browse fetches. This ordering matters: while playlists
-    // are rate-limited, wantPlaylists is re-set every frame, so it must not
-    // starve a play/seek the user just tapped.
-    if (wantPlay) {
-        wantPlay = false;
-        gui->activateDevice();
-        gui->api.play_by_uri(wantPlayUri, wantPlayOffset, 0);
-        return;
-    }
-    if (!wantPlayTrack.empty()) {
-        std::string u = wantPlayTrack;
-        wantPlayTrack.clear();
-        gui->activateDevice();
-        gui->api.play_track(u);
-        return;
-    }
-    if (wantSeek >= 0) {
-        int s = wantSeek;
-        wantSeek = -1;
-        gui->api.seek(static_cast<uint32_t>(s));
-        return;
-    }
-    if (wantShuffle >= 0) {
-        int s = wantShuffle;
-        wantShuffle = -1;
-        gui->api.set_shuffle(s != 0);
-        return;
-    }
-    if (wantRepeat >= 0) {
-        static const char* kModes[] = { "off", "context", "track" };
-        int r = wantRepeat;
-        wantRepeat = -1;
-        if (r >= 0 && r < 3) gui->api.set_repeat(kModes[r]);
-        return;
-    }
-    if (wantVolume >= 0) {
-        int v = wantVolume;
-        wantVolume = -1;
-        if (gui->cspot_started && gui->volumeCallback) gui->volumeCallback(v);
-        return;
-    }
-    if (!wantSearch.empty()) {
-        std::string q = wantSearch;
-        wantSearch.clear();
-        runSearch(q);
-        return;
-    }
-    if (wantTracks >= 0) {
-        int i = wantTracks;
-        wantTracks = -1;
-        if (i < static_cast<int>(playlists.size())) getTracks(static_cast<uint16_t>(i));
-        return;
-    }
-    if (wantPlaylists) {
-        wantPlaylists = false;
-        getPlaylists();
-        return;
-    }
-    // Lowest priority: resolve one playlist name per frame after a rootlist
-    // fetch. Runs off-frame like everything else, so the ~50-request burst
-    // never blocks the GPU; the UI shows names filling in, then it's cached.
-    if (namesPending) {
-        resolveNextName();
-        return;
+    // First run with no cache: fetch the library as soon as a token exists.
+    if (libraryState == LoadState::NONE && gui->api.has_token()) {
+        loadLibrary();
     }
 }
 
-// Runs on the GUI thread (texture creation must not happen on the cspot worker).
-void PlaybackScreen::setCoverArt(std::string url) {
-    GLuint tex = 0;
-    int w = 0, h = 0;
-    bool ok = false;
+// ---------------------------------------------------------------- network
 
-    if (is_cover_cached(url)) {
-        ok = LoadTextureFromFile(cover_art_path(url).c_str(), &tex, &w, &h);
-    } else {
-        uint8_t* png = NULL;
-        int len = download(url.c_str(), &png);
-        if (len > 0 && png != NULL) {
-            ok = LoadTextureFromMemory(png, len, &tex, &w, &h);
-            if (ok) {
-                cache_cover_art(url, png, len);
+void PlaybackScreen::fetchCover(const std::string &url) {
+    coverUrl = url;
+    GUI *g = gui;
+    gui->net.post([this, g, url] {
+        std::string bytes;
+        std::string path = cover_art_path(url);
+        bool cached = readWholeFile(path, &bytes);
+        if (!cached) {
+            uint8_t *buf = NULL;
+            int len = download(url.c_str(), &buf);
+            if (len > 0 && buf != NULL) bytes.assign(reinterpret_cast<char*>(buf), len);
+            free(buf);
+        }
+        int w = 0, h = 0;
+        uint8_t *rgba = bytes.empty() ? NULL
+            : decode_image(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(),
+                           COVER_MAX_SIDE, &w, &h);
+        if (rgba != NULL && !cached) {
+            cache_cover_art(url, reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+        }
+        g->net.deliver([this, url, rgba, w, h] {
+            if (rgba != NULL && url == coverUrl) {
+                GLuint tex = texture_from_rgba(rgba, w, h);
+                if (tex != 0) {
+                    if (cover_art_tex != placeholder_tex && cover_art_tex != 0) {
+                        glDeleteTextures(1, &cover_art_tex);
+                    }
+                    cover_art_tex = tex;
+                }
+            }
+            free(rgba);
+        });
+    });
+}
+
+void PlaybackScreen::loadLibrary() {
+    if (!gui->api.has_token()) {
+        gui->toast("Not connected to Spotify yet.");
+        return;
+    }
+    libraryState = playlists.empty() ? LoadState::LOADING : libraryState;
+    libraryError.clear();
+    int gen = ++libraryGen;
+    cancelTrackLoads();
+    namesLeft = 0;
+    std::map<std::string, std::string> known;
+    for (const auto &p : playlists) known[p.uri] = p.name;
+
+    GUI *g = gui;
+    gui->net.post([this, g, gen, known] {
+        ApiResult r = g->api.get_rootlist();
+        if (gen != libraryGen) return;
+        std::vector<std::string> uris;
+        if (r.ok()) {
+            for (auto &u : parseListUris(r.body, SPOTIFY_ROOTLIST_LENGTH)) {
+                if (u.compare(0, strlen(SPOTIFY_PLAYLIST_HEADER), SPOTIFY_PLAYLIST_HEADER) == 0) {
+                    uris.push_back(u);
+                }
             }
         }
-        if (png != NULL) {
-            free(png);
+        if (!r.ok() || uris.empty()) {
+            long status = r.status;
+            bool empty = r.ok();
+            g->net.deliver([this, gen, status, empty] {
+                if (gen != libraryGen) return;
+                libraryError = empty ? "No playlists in this account." : describeStatus(status);
+                libraryState = playlists.empty() ? LoadState::FAILED : LoadState::LOADED;
+                if (!playlists.empty()) gui->toast(libraryError);
+            });
+            return;
         }
-    }
+        g->net.deliver([this, gen, uris, known] {
+            if (gen != libraryGen) return;
+            std::vector<Playlist> fresh;
+            for (const auto &u : uris) {
+                Playlist p;
+                p.uri = u;
+                auto it = known.find(u);
+                p.name = it != known.end() ? it->second : std::string("Playlist");
+                fresh.push_back(std::move(p));
+            }
+            playlists = std::move(fresh);
+            openIndex = -1;
+            libraryState = LoadState::LOADED;
+            namesLeft = static_cast<int>(playlists.size());
+        });
 
-    if (ok) {
-        if (cover_art_tex != placeholder_tex && cover_art_tex != 0) {
-            glDeleteTextures(1, &cover_art_tex);
+        // Names (and the first track URIs, which come in the same response),
+        // one playlist at a time, streamed into the list as they resolve.
+        int failStreak = 0;
+        for (const auto &uri : uris) {
+            if (gen != libraryGen) return;
+            ApiResult d = g->api.get_playlist(idFromUri(uri, SPOTIFY_PLAYLIST_HEADER));
+            std::string name;
+            std::vector<std::string> items;
+            if (d.ok()) {
+                failStreak = 0;
+                name = parseListName(d.body);
+                items = parseListUris(d.body, SPOTIFY_PLAYLIST_TRACK_LIMIT);
+            } else if (++failStreak >= MAX_FAIL_STREAK) {
+                CSPOT_LOG(error, "playlist names: %d failures in a row, stopping", failStreak);
+                break;
+            }
+            g->net.deliver([this, gen, uri, name, items] {
+                if (gen != libraryGen) return;
+                if (namesLeft > 0) namesLeft--;
+                int i = findPlaylist(playlists, uri);
+                if (i < 0) return;
+                if (!name.empty()) playlists[i].name = name;
+                if (playlists[i].tracks.empty() && !items.empty()) {
+                    for (size_t k = 0; k < items.size(); k++) {
+                        if (items[k].compare(0, strlen(SPOTIFY_TRACK_HEADER), SPOTIFY_TRACK_HEADER) != 0) {
+                            continue;   // local files, episodes: not playable here
+                        }
+                        playlists[i].tracks.push_back({"", "", items[k], static_cast<uint32_t>(k)});
+                    }
+                }
+            });
         }
-        cover_art_tex = tex;
-        cover_art_width = w;
-        cover_art_height = h;
-    } else if (tex != 0) {
-        glDeleteTextures(1, &tex);
+        g->net.deliver([this, gen] {
+            if (gen != libraryGen) return;
+            namesLeft = 0;
+            savePlaylistCache(playlists);
+        });
+    });
+}
+
+// Only one playlist streams its titles at a time. Bumping the generation stops
+// the running job; its playlist goes back to NONE so reopening resumes it.
+void PlaybackScreen::cancelTrackLoads() {
+    tracksGen++;
+    for (auto &p : playlists) {
+        if (p.tracksState == LoadState::LOADING) p.tracksState = LoadState::NONE;
     }
 }
+
+void PlaybackScreen::openPlaylist(int index) {
+    if (index < 0 || index >= static_cast<int>(playlists.size())) return;
+    openIndex = index;
+    Playlist &pl = playlists[index];
+    if (pl.tracksState == LoadState::LOADED || pl.tracksState == LoadState::LOADING) return;
+    cancelTrackLoads();
+    pl.tracksState = LoadState::LOADING;
+    int gen = tracksGen;
+    std::string uri = pl.uri;
+    std::vector<TrackRow> known = pl.tracks;
+
+    GUI *g = gui;
+    gui->net.post([this, g, gen, uri, known] {
+        std::string plId = idFromUri(uri, SPOTIFY_PLAYLIST_HEADER);
+        std::vector<TrackRow> rows = known;
+        if (rows.empty()) {
+            ApiResult d = g->api.get_playlist(plId);
+            if (!d.ok()) {
+                long status = d.status;
+                g->net.deliver([this, uri, status] {
+                    int i = findPlaylist(playlists, uri);
+                    if (i < 0) return;
+                    playlists[i].tracksState = LoadState::FAILED;
+                    gui->toast(describeStatus(status));
+                });
+                return;
+            }
+            auto items = parseListUris(d.body, SPOTIFY_PLAYLIST_TRACK_LIMIT);
+            for (size_t k = 0; k < items.size(); k++) {
+                if (items[k].compare(0, strlen(SPOTIFY_TRACK_HEADER), SPOTIFY_TRACK_HEADER) == 0) {
+                    rows.push_back({"", "", items[k], static_cast<uint32_t>(k)});
+                }
+            }
+            g->net.deliver([this, uri, rows] {
+                int i = findPlaylist(playlists, uri);
+                if (i >= 0 && playlists[i].tracks.empty()) playlists[i].tracks = rows;
+            });
+        }
+
+        // Titles via spclient metadata, one request per track, streamed in
+        // batches. If spclient refuses metadata outright, fall back to one Web
+        // API call for the whole page.
+        std::vector<std::pair<size_t, std::pair<std::string, std::string>>> batch;
+        auto flush = [&]() {
+            if (batch.empty()) return;
+            auto done = batch;
+            batch.clear();
+            g->net.deliver([this, uri, done] {
+                int i = findPlaylist(playlists, uri);
+                if (i < 0) return;
+                auto &tracks = playlists[i].tracks;
+                for (auto &d : done) {
+                    if (d.first < tracks.size()) {
+                        tracks[d.first].name = d.second.first;
+                        tracks[d.first].artist = d.second.second;
+                    }
+                }
+            });
+        };
+        int failStreak = 0;
+        bool useWeb = false;
+        for (size_t k = 0; k < rows.size(); k++) {
+            if (gen != tracksGen) return;
+            ApiResult m = g->api.get_track_metadata(idFromUri(rows[k].uri, SPOTIFY_TRACK_HEADER));
+            std::string name, artist;
+            if (m.ok()) {
+                failStreak = 0;
+                parseTrackMeta(m.body, &name, &artist);
+            } else if (k == 0 && m.status >= 400) {
+                useWeb = true;
+                break;
+            } else if (++failStreak >= MAX_FAIL_STREAK) {
+                break;
+            }
+            batch.push_back({k, {name.empty() ? std::string("Unavailable") : name, artist}});
+            if (static_cast<int>(batch.size()) >= TRACK_BATCH) flush();
+        }
+        flush();
+
+        if (useWeb && gen == tracksGen) {
+            ApiResult w = g->api.get_playlist_tracks_web(plId);
+            std::map<std::string, std::pair<std::string, std::string>> byUri;
+            if (w.ok()) {
+                cJSON *root = cJSON_Parse(w.body.c_str());
+                cJSON *items = root ? cJSON_GetObjectItem(root, "items") : NULL;
+                int n = cJSON_IsArray(items) ? cJSON_GetArraySize(items) : 0;
+                for (int i = 0; i < n; i++) {
+                    cJSON *t = cJSON_GetObjectItem(cJSON_GetArrayItem(items, i), "track");
+                    std::string u = jsonStr(t, "uri");
+                    if (!u.empty()) byUri[u] = {jsonStr(t, "name"), jsonArtists(t)};
+                }
+                cJSON_Delete(root);
+            }
+            for (size_t k = 0; k < rows.size(); k++) {
+                auto it = byUri.find(rows[k].uri);
+                batch.push_back({k, it != byUri.end() ? it->second
+                                     : std::make_pair(std::string("Unavailable"), std::string())});
+            }
+            flush();
+            if (!w.ok()) {
+                long status = w.status;
+                g->net.deliver([this, status] { gui->toast(describeStatus(status)); });
+            }
+        }
+        g->net.deliver([this, uri] {
+            int i = findPlaylist(playlists, uri);
+            if (i >= 0) playlists[i].tracksState = LoadState::LOADED;
+        });
+    });
+}
+
+void PlaybackScreen::startSearch(const std::string &query) {
+    searchQuery = query;
+    searchResults.clear();
+    searchState = LoadState::LOADING;
+    GUI *g = gui;
+    gui->net.post([this, g, query] {
+        ApiResult r = g->api.search(query, 20);
+        std::vector<SearchTrack> found;
+        if (r.ok()) {
+            cJSON *root = cJSON_Parse(r.body.c_str());
+            cJSON *tracks = root ? cJSON_GetObjectItem(root, "tracks") : NULL;
+            cJSON *items = tracks ? cJSON_GetObjectItem(tracks, "items") : NULL;
+            int n = cJSON_IsArray(items) ? cJSON_GetArraySize(items) : 0;
+            for (int i = 0; i < n; i++) {
+                cJSON *it = cJSON_GetArrayItem(items, i);
+                std::string name = jsonStr(it, "name"), uri = jsonStr(it, "uri");
+                if (name.empty() || uri.empty()) continue;
+                std::string artists = jsonArtists(it);
+                found.push_back({artists.empty() ? name : name + "\n" + artists, uri});
+            }
+            cJSON_Delete(root);
+        }
+        long status = r.status;
+        g->net.deliver([this, query, found, status] {
+            if (query != searchQuery) return;   // a newer search replaced this one
+            searchResults = found;
+            searchState = status >= 200 && status < 300 ? LoadState::LOADED : LoadState::FAILED;
+            if (searchState == LoadState::FAILED) gui->toast(describeStatus(status));
+        });
+    }, true);
+}
+
+void PlaybackScreen::reportPlayerError(long status) {
+    if (status >= 200 && status < 300) return;
+    gui->toast(describeStatus(status));
+}
+
+void PlaybackScreen::playContext(const std::string &uri, uint32_t offset) {
+    GUI *g = gui;
+    gui->net.post([this, g, uri, offset] {
+        long status = g->api.play_context(uri, offset).status;
+        g->net.deliver([this, status] { reportPlayerError(status); });
+    }, true);
+}
+
+void PlaybackScreen::playTrack(const std::string &uri) {
+    GUI *g = gui;
+    gui->net.post([this, g, uri] {
+        long status = g->api.play_track(uri).status;
+        g->net.deliver([this, status] { reportPlayerError(status); });
+    }, true);
+}
+
+void PlaybackScreen::sendSeek(int ms) {
+    GUI *g = gui;
+    gui->net.post([this, g, ms] {
+        long status = g->api.seek(static_cast<uint32_t>(ms)).status;
+        g->net.deliver([this, status] { reportPlayerError(status); });
+    }, true);
+}
+
+void PlaybackScreen::sendShuffle(bool on) {
+    GUI *g = gui;
+    gui->net.post([this, g, on] {
+        long status = g->api.set_shuffle(on).status;
+        g->net.deliver([this, status, on] {
+            if (status < 200 || status >= 300) shuffleOn = !on;   // undo the optimistic flip
+            reportPlayerError(status);
+        });
+    }, true);
+}
+
+void PlaybackScreen::sendRepeat(int mode) {
+    static const char* kModes[] = { "off", "context", "track" };
+    GUI *g = gui;
+    int previous = repeatMode;
+    gui->net.post([this, g, mode, previous] {
+        long status = g->api.set_repeat(kModes[mode]).status;
+        g->net.deliver([this, status, previous] {
+            if (status < 200 || status >= 300) repeatMode = previous;
+            reportPlayerError(status);
+        });
+    }, true);
+}
+
+// ---------------------------------------------------------------- drawing
 
 void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
     float paneW = ImGui::GetContentRegionAvail().x;
-    // Sized to fit inside 544 with no scroll: cover 190 + text + scrubber +
-    // 64 px transport + volume all sum under the ~480 px child content area.
     float coverSz = paneW - 90.0f;
     if (coverSz > 190.0f) coverSz = 190.0f;
     if (coverSz < 110.0f) coverSz = 110.0f;
@@ -389,12 +758,18 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
 
     ImGui::Dummy(ImVec2(0.0f, 12.0f));
 
+    bool idle = snap.durationMs == 0 && snap.artist.empty();
     ImGui::PushFont(gui->font_bold);
-    TextCentered(snap.name);
+    TextCentered(idle ? std::string("Nothing playing") : snap.name);
     ImGui::PopFont();
     ImGui::Dummy(ImVec2(0.0f, 2.0f));
     ImGui::PushStyleColor(ImGuiCol_Text, COL_GREY);
-    TextCentered(snap.artist.empty() ? snap.album : snap.artist);
+    if (idle) {
+        TextCentered(gui->cspot_started ? "Pick a playlist, or play from your phone"
+                                        : "Connecting to Spotify...");
+    } else {
+        TextCentered(snap.artist.empty() ? snap.album : snap.artist);
+    }
     ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(0.0f, 12.0f));
@@ -405,8 +780,8 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
     if (scrubbing) frac = scrubFrac;
     float held = 0.0f;
     ImGui::SetCursorPosX(16.0f);
-    bool nowHeld = barControl("scrub", frac, ImVec2(barW, 20.0f), COL_WHITE, true, &held);
-    if (nowHeld) {
+    bool nowHeld = barControl("scrub", frac, ImVec2(barW, 24.0f), COL_WHITE, false, &held);
+    if (nowHeld && snap.durationMs > 0) {
         scrubbing = true;
         scrubFrac = held;
     } else if (scrubbing) {
@@ -414,69 +789,70 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
         int ms = static_cast<int>(scrubFrac * snap.durationMs);
         if (ms < 0) ms = 0;
         gui->player.setPosition(ms);   // instant local feedback
-        wantSeek = ms;                 // Web API seek runs off-frame
+        sendSeek(ms);
     }
 
     int shownMs = scrubbing ? static_cast<int>(scrubFrac * snap.durationMs) : snap.positionMs;
     std::string left = fmtTime(shownMs);
     std::string right = fmtTime(snap.durationMs);
     ImGui::PushFont(gui->log_font);
+    ImGui::PushStyleColor(ImGuiCol_Text, COL_GREY);
     ImGui::SetCursorPosX(16.0f);
     ImGui::TextUnformatted(left.c_str());
     ImGui::SameLine();
     float rw = ImGui::CalcTextSize(right.c_str()).x;
     ImGui::SetCursorPosX(16.0f + barW - rw);
     ImGui::TextUnformatted(right.c_str());
+    ImGui::PopStyleColor();
     ImGui::PopFont();
 
-    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
 
     // Transport, Spotify order: shuffle / prev / play / next / repeat.
-    // Uniform 64 px height keeps the row aligned; widths vary.
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0f, 0.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 50.0f);
     AlignForWidth(52.0f + 64.0f + 72.0f + 64.0f + 52.0f + 8.0f * 4.0f);
 
+    bool ready = gui->cspot_started;
     ImGui::PushFont(gui->icon_font);
     if (iconButton(ICON_FA_RANDOM "##shuffle", ImVec2(52.0f, 64.0f),
-                   shuffleOn ? COL_GREENV : COL_GREY, COL_CLEAR)) {
-        if (gui->cspot_started) {
-            shuffleOn = !shuffleOn;
-            wantShuffle = shuffleOn ? 1 : 0;
-        }
+                   shuffleOn ? COL_GREENV : COL_GREY, COL_CLEAR) && ready) {
+        shuffleOn = !shuffleOn;
+        sendShuffle(shuffleOn);
     }
     ImGui::SameLine();
-
-    if (iconButton(ICON_FA_STEP_BACKWARD "##prev", ImVec2(64.0f, 64.0f), COL_WHITE, COL_CLEAR)) {
-        if (gui->cspot_started) gui->prevCallback();
+    if (iconButton(ICON_FA_STEP_BACKWARD "##prev", ImVec2(64.0f, 64.0f), COL_WHITE, COL_CLEAR) && ready) {
+        gui->prevCallback();
     }
     ImGui::PopFont();
     ImGui::SameLine();
 
     ImGui::PushFont(gui->playback_icon_font);
     const char* playIcon = snap.paused ? ICON_FA_PLAY_CIRCLE "###pp" : ICON_FA_PAUSE_CIRCLE "###pp";  // NOLINT
-    if (iconButton(playIcon, ImVec2(72.0f, 64.0f), COL_WHITE, COL_CLEAR)) {
-        if (gui->cspot_started) gui->playToggleCallback();
+    if (iconButton(playIcon, ImVec2(72.0f, 64.0f), COL_WHITE, COL_CLEAR) && ready) {
+        gui->playToggleCallback();
     }
     ImGui::PopFont();
     ImGui::SameLine();
 
     ImGui::PushFont(gui->icon_font);
-    if (iconButton(ICON_FA_STEP_FORWARD "##next", ImVec2(64.0f, 64.0f), COL_WHITE, COL_CLEAR)) {
-        if (gui->cspot_started) gui->nextCallback();
+    if (iconButton(ICON_FA_STEP_FORWARD "##next", ImVec2(64.0f, 64.0f), COL_WHITE, COL_CLEAR) && ready) {
+        gui->nextCallback();
     }
     ImGui::SameLine();
-
     if (iconButton(ICON_FA_REDO "##repeat", ImVec2(52.0f, 64.0f),
-                   repeatMode != 0 ? COL_GREENV : COL_GREY, COL_CLEAR)) {
-        if (gui->cspot_started) {
-            repeatMode = (repeatMode + 1) % 3;
-            wantRepeat = repeatMode;
-        }
+                   repeatMode != 0 ? COL_GREENV : COL_GREY, COL_CLEAR) && ready) {
+        repeatMode = (repeatMode + 1) % 3;
+        sendRepeat(repeatMode);
     }
     ImGui::PopFont();
-
     ImGui::PopStyleVar(2);
+
+    // Repeat-one has no separate glyph in the bundled icon range: mark it.
+    if (repeatMode == 2) {
+        ImVec2 r = ImGui::GetItemRectMax();
+        ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(r.x - 8.0f, r.y - 14.0f), 4.0f, COL_GREENV);
+    }
 
     ImGui::Dummy(ImVec2(0.0f, 10.0f));
 
@@ -485,7 +861,7 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
     if (volSliding) volFrac = volSlideFrac;
     float volHeld = 0.0f;
     ImGui::SetCursorPosX(16.0f);
-    bool volNow = barControl("vol", volFrac, ImVec2(barW, 18.0f), COL_GREENV, false, &volHeld);
+    bool volNow = barControl("vol", volFrac, ImVec2(barW, 22.0f), COL_GREENV, false, &volHeld);
     if (volNow) {
         volSliding = true;
         volSlideFrac = volHeld;
@@ -493,161 +869,180 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
         volSliding = false;
         int v = static_cast<int>(volSlideFrac * 65535.0f);
         gui->player.setVolume(v);   // instant local feedback
-        wantVolume = v;             // pushed to cspot off-frame
+        gui->volumeCallback(v);
     }
+}
+
+void PlaybackScreen::drawLibrary(const PlayerModel::Snapshot&, float avail) {
+    ImGui::PushFont(gui->font_bold);
+    ImGui::TextUnformatted("Your Library");
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+
+    if (namesLeft > 0) {
+        Spinner("Updating playlists...");
+    }
+    if (playlists.empty()) {
+        if (libraryState == LoadState::LOADING) {
+            Spinner("Loading your playlists...");
+        } else if (!gui->api.has_token()) {
+            greyText(gui->cspot_started ? "Signing in to Spotify..." : "Connecting to Spotify...");
+        } else {
+            greyText(libraryError.empty() ? "No playlists yet." : libraryError);
+            ImGui::Dummy(ImVec2(0.0f, 6.0f));
+            if (pillButton("Try again", ImVec2(160.0f, 44.0f), COL_WHITE, IM_COL32(18, 18, 18, 255))) {
+                loadLibrary();
+            }
+        }
+    }
+    for (size_t i = 0; i < playlists.size(); i++) {
+        std::string id = "##pl" + std::to_string(i);
+        const Playlist &p = playlists[i];
+        if (listRow(id.c_str(), p.name, "", avail, COL_WHITE, gui->log_font)) {
+            openPlaylist(static_cast<int>(i));
+        }
+    }
+}
+
+void PlaybackScreen::drawPlaylist(const PlayerModel::Snapshot& snap, float avail) {
+    Playlist& pl = playlists[openIndex];
+    ImGui::PushFont(gui->icon_font);
+    bool back = iconButton(ICON_FA_ARROW_LEFT "##back", ImVec2(56.0f, 48.0f), COL_WHITE, COL_CLEAR);
+    ImGui::PopFont();
+    ImGui::SameLine();
+    ImGui::PushFont(gui->font_bold);
+    ImGui::TextUnformatted(pl.name.c_str());
+    ImGui::PopFont();
+    if (back) {
+        openIndex = -1;
+        cancelTrackLoads();   // stop streaming titles for a list nobody looks at
+        return;
+    }
+    ImGui::Dummy(ImVec2(0.0f, 2.0f));
+    if (pillButton("Play", ImVec2(120.0f, 44.0f), COL_GREENV, IM_COL32(18, 18, 18, 255))) {
+        playContext(pl.uri, 0);
+    }
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+
+    if (pl.tracks.empty()) {
+        if (pl.tracksState == LoadState::LOADING) {
+            Spinner("Loading tracks...");
+        } else if (pl.tracksState == LoadState::FAILED) {
+            greyText("Could not load this playlist.");
+            if (pillButton("Try again", ImVec2(160.0f, 44.0f), COL_WHITE, IM_COL32(18, 18, 18, 255))) {
+                pl.tracksState = LoadState::NONE;
+                openPlaylist(openIndex);
+            }
+        } else {
+            greyText("This playlist has no playable tracks.");
+        }
+        return;
+    }
+    for (size_t t = 0; t < pl.tracks.size(); t++) {
+        const TrackRow &row = pl.tracks[t];
+        std::string id = "##t" + std::to_string(t);
+        bool current = !row.name.empty() && row.name == snap.name;
+        ImU32 fg = row.name.empty() ? COL_DIM : (current ? COL_GREENV : COL_WHITE);
+        if (listRow(id.c_str(), row.name.empty() ? std::string("...") : row.name, row.artist,
+                    avail, fg, gui->log_font)) {
+            playContext(pl.uri, row.position);
+        }
+    }
+    if (pl.tracksState == LoadState::LOADING) {
+        Spinner("");
+    }
+}
+
+void PlaybackScreen::drawSearch(float avail) {
+    ImGui::PushFont(gui->font_bold);
+    ImGui::TextUnformatted("Search");
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+
+    std::string label = searchQuery.empty() ? std::string("Songs, artists...") : searchQuery;
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.05f, 0.5f));
+    bool open = pillButton((label + "##q").c_str(), ImVec2(avail, 46.0f), IM_COL32(40, 40, 40, 255),
+                           searchQuery.empty() ? COL_GREY : COL_WHITE);
+    ImGui::PopStyleVar();
+    if (open) {
+        Keyboard::Open("Search Spotify", searchQuery, [this](const std::string &q) {
+            if (!q.empty()) startSearch(q);
+        });
+    }
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+
+    if (searchState == LoadState::LOADING) {
+        Spinner("Searching...");
+    } else if (searchState == LoadState::LOADED && searchResults.empty()) {
+        greyText("No results.");
+    } else if (searchState == LoadState::FAILED) {
+        greyText("Search failed. Tap the field to try again.");
+    }
+    for (size_t i = 0; i < searchResults.size(); i++) {
+        const std::string &l = searchResults[i].label;
+        size_t nl = l.find('\n');
+        std::string id = "##r" + std::to_string(i);
+        if (listRow(id.c_str(), l.substr(0, nl), nl == std::string::npos ? "" : l.substr(nl + 1),
+                    avail, COL_WHITE, gui->log_font)) {
+            playTrack(searchResults[i].uri);
+        }
+    }
+}
+
+void PlaybackScreen::drawLog() {
+    bool grew = log_snapshot(&logCopy, &logVersion);
+    ImGui::PushFont(gui->log_font);
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextUnformatted(logCopy.c_str(), logCopy.c_str() + logCopy.size());
+    ImGui::PopTextWrapPos();
+    ImGui::PopFont();
+    // Follow the tail unless the user scrolled up to read.
+    if (grew && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 40.0f) {
+        ImGui::SetScrollHere(1.0f);
+    }
+}
+
+void PlaybackScreen::drawSettings(float avail) {
+    ImGui::PushFont(gui->font_bold);
+    ImGui::TextUnformatted("Settings");
+    ImGui::PopFont();
+    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+
+    if (ImGui::Button("Refresh playlists", ImVec2(avail, 48.0f))) {
+        loadLibrary();
+    }
+    if (ImGui::Button("Unlink this Spotify account", ImVec2(avail, 48.0f))) {
+        remove(CREDENTIALS_FILE_NAME);
+        remove(PLAYLIST_CACHE_PATH);
+        gui->isRunning = false;
+    }
+    if (ImGui::Button("Exit", ImVec2(avail, 48.0f))) {
+        gui->isRunning = false;
+    }
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    ImGui::PushFont(gui->log_font);
+    greyText("Shortcuts: START play/pause, L/R previous/next, SELECT next tab, right stick scrolls.");
+    ImGui::PopFont();
 }
 
 void PlaybackScreen::drawBrowse(const PlayerModel::Snapshot& snap) {
     float avail = ImGui::GetContentRegionAvail().x;
-
     switch (tab) {
-        case Tab::LIBRARY: {
-            // ONE fetch, ever: only when we have a token, have never fetched,
-            // and have no cached list. NO auto-retry on rate limit -- retrying
-            // is exactly what sustains the global 429. If it fails the user hits
-            // "Refresh playlists" in Settings, which clears playlistsRequested.
-            // Gate on the token (not cspot_started) to avoid racing the login5
-            // curl on the cspot thread at boot.
-            if (gui->api.has_token() && !playlistsRequested) {
-                playlistsRequested = true;
-                wantPlaylists = true;
-            }
-
-            if (openPlaylist >= 0 && openPlaylist < static_cast<int>(playlists.size())) {
-                // Track view of one playlist, with a back row on top.
-                Playlist& pl = playlists[openPlaylist];
-                ImGui::PushFont(gui->icon_font);
-                bool back = iconButton(ICON_FA_ARROW_LEFT "##back", ImVec2(56.0f, 48.0f),
-                                       COL_WHITE, COL_CLEAR);
-                ImGui::PopFont();
-                ImGui::SameLine();
-                ImGui::PushFont(gui->font_bold);
-                ImGui::TextUnformatted(pl.name.c_str());
-                ImGui::PopFont();
-                if (back) {
-                    openPlaylist = -1;
-                    break;
-                }
-                ImGui::Dummy(ImVec2(0.0f, 4.0f));
-
-                ImGui::PushStyleColor(ImGuiCol_Button, COL_GREENV);
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, COL_GREENV);
-                ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(18, 18, 18, 255));
-                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 22.0f);
-                if (ImGui::Button("Play", ImVec2(120.0f, 44.0f))) {
-                    wantPlay = true; wantPlayUri = pl.uri; wantPlayOffset = 0;
-                }
-                ImGui::PopStyleVar();
-                ImGui::PopStyleColor(3);
-                ImGui::Dummy(ImVec2(0.0f, 4.0f));
-
-                if (!pl.tracks_loaded) {
-                    wantTracks = openPlaylist;
-                }
-                if (!pl.tracks_loaded && pl.tracks.empty()) {
-                    Spinner("Chargement des titres...", COL_GREENV);
-                }
-                for (uint32_t t = 0; t < pl.tracks.size(); t++) {
-                    std::string lbl = pl.tracks[t] + "##t" + std::to_string(t);
-                    // Currently playing track is tinted Spotify green.
-                    ImU32 fg = (pl.tracks[t] == snap.name) ? COL_GREENV : COL_WHITE;
-                    if (listRow(lbl.c_str(), avail, fg)) {
-                        wantPlay = true; wantPlayUri = pl.uri; wantPlayOffset = t;
-                    }
-                }
+        case Tab::LIBRARY:
+            if (openIndex >= 0 && openIndex < static_cast<int>(playlists.size())) {
+                drawPlaylist(snap, avail);
             } else {
-                ImGui::PushFont(gui->font_bold);
-                ImGui::TextUnformatted("Your Library");
-                ImGui::PopFont();
-                ImGui::Dummy(ImVec2(0.0f, 6.0f));
-
-                if (namesPending) {
-                    Spinner("Chargement...", COL_GREENV);
-                    ImGui::Dummy(ImVec2(0.0f, 4.0f));
-                }
-                if (playlists.empty()) {
-                    const char* msg = !gui->api.has_token() ? "Connecting..."
-                                    : rateLimited ? "Rate limited. Try Refresh in Settings later."
-                                    : "No playlists yet. Refresh in Settings.";
-                    ImGui::PushStyleColor(ImGuiCol_Text, COL_GREY);
-                    ImGui::TextUnformatted(msg);
-                    ImGui::PopStyleColor();
-                }
-                for (uint16_t i = 0; i < playlists.size(); i++) {
-                    std::string lbl = playlists[i].name + "##p" + std::to_string(i);
-                    if (listRow(lbl.c_str(), avail, COL_WHITE)) {
-                        openPlaylist = i;
-                    }
-                }
+                drawLibrary(snap, avail);
             }
             break;
-        }
-        case Tab::SEARCH: {
-            ImGui::PushFont(gui->font_bold);
-            ImGui::TextUnformatted("Search");
-            ImGui::PopFont();
-            ImGui::Dummy(ImVec2(0.0f, 6.0f));
-
-            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 22.0f);
-            std::string label = searchQuery.empty() ? std::string("Tap to search Spotify...")
-                                                     : searchQuery;
-            if (ImGui::Button(label.c_str(), ImVec2(avail, 44.0f))) {
-                std::string q = Keyboard::GetText("Search Spotify");
-                if (!q.empty()) {
-                    searchQuery = q;
-                    wantSearch = q;
-                    searchPending = true;
-                    searchResults.clear();
-                }
-            }
-            ImGui::PopStyleVar();
-            ImGui::Dummy(ImVec2(0.0f, 6.0f));
-
-            if (searchPending) {
-                Spinner("Recherche...", COL_GREENV);
-            } else if (!searchQuery.empty() && searchResults.empty()) {
-                ImGui::PushStyleColor(ImGuiCol_Text, COL_GREY);
-                ImGui::TextUnformatted("Aucun resultat.");
-                ImGui::PopStyleColor();
-            }
-            for (size_t i = 0; i < searchResults.size(); i++) {
-                std::string lbl = searchResults[i].label + "##r" + std::to_string(i);
-                if (listRow(lbl.c_str(), avail, COL_WHITE)) {
-                    wantPlayTrack = searchResults[i].uri;
-                }
-            }
+        case Tab::SEARCH:
+            drawSearch(avail);
             break;
-        }
         case Tab::LOG:
-            ImGui::PushFont(gui->log_font);
-            ImGui::TextUnformatted(getBuf()->begin());
-            ImGui::PopFont();
-            if (getScrollToBottom()) {
-                ImGui::SetScrollHere(1.0f);
-            }
-            setScrollToBottom(false);
+            drawLog();
             break;
         case Tab::SETTINGS:
-            ImGui::PushFont(gui->font_bold);
-            ImGui::TextUnformatted("Settings");
-            ImGui::PopFont();
-            ImGui::Dummy(ImVec2(0.0f, 6.0f));
-            // Keep the current (cached) list on screen; getPlaylists only
-            // replaces it on a successful fetch, so a failed refresh doesn't
-            // wipe what the user could already browse.
-            if (ImGui::Button("Refresh playlists", ImVec2(avail, 0.0f))) {
-                playlistsRequested = false;   // allow exactly one more fetch
-                backoffStep = 0;
-                backoffUntilUs = 0;
-                wantPlaylists = true;
-            }
-            if (ImGui::Button("Logout", ImVec2(avail, 0.0f))) {
-                remove(CREDENTIALS_FILE_NAME);
-                gui->isRunning = false;
-            }
-            if (ImGui::Button("Exit", ImVec2(avail, 0.0f))) {
-                gui->isRunning = false;
-            }
+            drawSettings(avail);
             break;
     }
 }
@@ -657,23 +1052,20 @@ void PlaybackScreen::drawNav() {
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 12.0f);
     ImGui::PushFont(gui->icon_font);
 
-    ImVec2 nb(60.0f, 60.0f);
+    ImVec2 nb(64.0f, 60.0f);
     AlignForWidth(nb.x * 4.0f + ImGui::GetStyle().ItemSpacing.x * 3.0f);
 
-    if (StyleButton(ICON_FA_MUSIC, nb, tab == Tab::LIBRARY)) {
-        tab = Tab::LIBRARY;
-    }
-    ImGui::SameLine();
-    if (StyleButton(ICON_FA_SEARCH, nb, tab == Tab::SEARCH)) {
-        tab = Tab::SEARCH;
-    }
-    ImGui::SameLine();
-    if (StyleButton(ICON_FA_BOOK, nb, tab == Tab::LOG)) {
-        tab = Tab::LOG;
-    }
-    ImGui::SameLine();
-    if (StyleButton(ICON_FA_COG, nb, tab == Tab::SETTINGS)) {
-        tab = Tab::SETTINGS;
+    static const struct { const char *icon; Tab tab; } kTabs[] = {
+        {ICON_FA_MUSIC "##tl", Tab::LIBRARY}, {ICON_FA_SEARCH "##ts", Tab::SEARCH},
+        {ICON_FA_BOOK "##tg", Tab::LOG}, {ICON_FA_COG "##tc", Tab::SETTINGS},
+    };
+    for (int i = 0; i < 4; i++) {
+        if (i > 0) ImGui::SameLine();
+        if (StyleButton(kTabs[i].icon, nb, tab == kTabs[i].tab)) {
+            // Tapping Library while inside a playlist goes back to the list.
+            if (tab == Tab::LIBRARY && kTabs[i].tab == Tab::LIBRARY) openIndex = -1;
+            tab = kTabs[i].tab;
+        }
     }
 
     ImGui::PopFont();
@@ -681,23 +1073,24 @@ void PlaybackScreen::drawNav() {
 }
 
 void PlaybackScreen::draw() {
-    // One coherent snapshot per frame. A changed cover URL is only RECORDED
-    // here; the download + GL upload happen in processPendingCover(), outside
-    // the open ImGui frame (network mid-frame can wedge SceGxm).
     PlayerModel::Snapshot snap = gui->player.snapshot();
-    if (snap.imageUrl != loadedCoverUrl) {
-        loadedCoverUrl = snap.imageUrl;
-        if (!snap.imageUrl.empty()) {
-            pendingCoverUrl = snap.imageUrl;
-        }
+
+    // Global shortcuts, independent of where the gamepad focus is.
+    uint32_t pressed = Input::pressed();
+    if (gui->cspot_started) {
+        if (pressed & SCE_CTRL_START) gui->playToggleCallback();
+        if (pressed & SCE_CTRL_LTRIGGER) gui->prevCallback();
+        if (pressed & SCE_CTRL_RTRIGGER) gui->nextCallback();
+    }
+    if (pressed & SCE_CTRL_SELECT) {
+        tab = static_cast<Tab>((static_cast<int>(tab) + 1) % 4);
     }
 
     float fullW = ImGui::GetContentRegionAvail().x;
     float leftW = fullW * 0.46f;
 
-    // Now-playing is fixed-size: forbid scrolling so a button press near the
-    // bottom can't auto-scroll the pane (the "interface scrolls down on
-    // actions" bug). The browse list keeps its scrollbar for long playlists.
+    // Now-playing is fixed-size: no scrolling, so a press near the bottom
+    // can't auto-scroll the pane.
     const ImGuiWindowFlags kNoScroll = ImGuiWindowFlags_NavFlattened |
                                        ImGuiWindowFlags_NoScrollbar |
                                        ImGuiWindowFlags_NoScrollWithMouse;
@@ -708,11 +1101,16 @@ void PlaybackScreen::draw() {
 
     ImGui::SameLine();
 
-    ImGui::BeginChild("right", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_NavFlattened);
+    ImGui::BeginChild("right", ImVec2(0.0f, 0.0f), false, kNoScroll);
     {
-        float navH = 80.0f;
-        ImGui::BeginChild("browse", ImVec2(0.0f, ImGui::GetContentRegionAvail().y - navH),
+        float navH = 76.0f;
+        // One scroll position per tab/view: the ID changes with the view, so
+        // opening a playlist starts at its top instead of the library's offset.
+        std::string browseId = "browse" + std::to_string(static_cast<int>(tab)) +
+                               (tab == Tab::LIBRARY && openIndex >= 0 ? "_" + std::to_string(openIndex) : "");
+        ImGui::BeginChild(browseId.c_str(), ImVec2(0.0f, ImGui::GetContentRegionAvail().y - navH),
                           false, ImGuiWindowFlags_NavFlattened);
+        Input::scroll_area();
         drawBrowse(snap);
         ImGui::EndChild();
 
@@ -723,205 +1121,66 @@ void PlaybackScreen::draw() {
     ImGui::EndChild();
 }
 
-void PlaybackScreen::getTracks(uint16_t index) {
-    // Shared rate-limit backoff (same window as getPlaylists): don't retry a
-    // 429'd track fetch every frame.
-    if (sceKernelGetProcessTimeWide() < backoffUntilUs) {
-        return;
+std::string PlaybackScreen::debugState() {
+    static const char *kTabs[] = {"library", "search", "log", "settings"};
+    std::string out = "{\"tab\":" + json_quote(kTabs[static_cast<int>(tab)]) +
+        ",\"library\":{\"state\":" + json_quote(stateName(libraryState)) +
+        ",\"error\":" + json_quote(libraryError) +
+        ",\"count\":" + std::to_string(playlists.size()) +
+        ",\"names_left\":" + std::to_string(namesLeft) +
+        ",\"playlists\":[";
+    for (size_t i = 0; i < playlists.size() && i < 12; i++) {
+        if (i) out += ",";
+        out += json_quote(playlists[i].name);
     }
-    CSPOT_LOG(debug, "Get tracks for playlist: %d", index);
-    std::string uri = playlists[index].uri;
-
-    if (!uri.starts_with(SPOTIFY_PLAYLIST_HEADER)) {
-        playlists[index].tracks_loaded = true;
-        return;
-    }
-    uri.erase(0, strlen(SPOTIFY_PLAYLIST_HEADER));
-    playlists[index].tracks.clear();
-
-    // ONE request, first 50 tracks. Same shared-client rate limit as the
-    // playlist list: paginating a long playlist in a burst instantly 429s.
-    uint8_t *json_data = NULL;
-    int json_len = gui->api.get_playlist_items(&json_data, uri, SPOTIFY_PLAYLIST_FIELDS,
-                                               SPOTIFY_TRACK_FETCH_CHUNK_SIZE, 0);
-
-    if (json_len <= 0) {
-        CSPOT_LOG(error, "error requesting songs from playlist");
-        if (json_data != NULL) free(json_data);
-        // Not tracks_loaded: let the user retry by reopening; a transient 429
-        // shouldn't permanently show an empty playlist.
-        return;
-    }
-
-    cJSON *root = cJSON_Parse((const char *) json_data);
-    free(json_data);
-    if (root == NULL) {
-        return;
-    }
-    if (cJSON_HasObjectItem(root, "error")) {
-        rateLimited = true;
-        if (backoffStep < 8) backoffStep++;
-        backoffUntilUs = sceKernelGetProcessTimeWide() +
-                         static_cast<uint64_t>(backoffStep) * 30000000ULL;
-        cJSON_Delete(root);
-        return;
-    }
-    cJSON *json_items = cJSON_GetObjectItem(root, "items");
-    if (!cJSON_IsArray(json_items)) {
-        playlists[index].tracks_loaded = true;
-        cJSON_Delete(root);
-        return;
-    }
-    int count = cJSON_GetArraySize(json_items);
-    for (int i = 0; i < count; i++) {
-        cJSON *item = cJSON_GetArrayItem(json_items, i);
-        cJSON *track = cJSON_GetObjectItem(item, "track");
-        cJSON *trackName = cJSON_GetObjectItem(track, "name");
-        if (cJSON_IsString(trackName) && trackName->valuestring != NULL) {
-            playlists[index].tracks.push_back(std::string(trackName->valuestring));
+    out += "]},\"open\":";
+    if (openIndex >= 0 && openIndex < static_cast<int>(playlists.size())) {
+        const Playlist &p = playlists[openIndex];
+        out += "{\"index\":" + std::to_string(openIndex) + ",\"name\":" + json_quote(p.name) +
+               ",\"state\":" + json_quote(stateName(p.tracksState)) +
+               ",\"count\":" + std::to_string(p.tracks.size()) + ",\"tracks\":[";
+        for (size_t t = 0; t < p.tracks.size() && t < 12; t++) {
+            if (t) out += ",";
+            out += json_quote(p.tracks[t].name);
         }
-    }
-    playlists[index].tracks_loaded = true;
-    cJSON_Delete(root);
-    CSPOT_LOG(debug, "Got %d tracks", count);
-}
-
-void PlaybackScreen::getPlaylists() {
-    if (!gui->api.has_token()) {
-        return;
-    }
-    CSPOT_LOG(debug, "Get rootlist (spclient)");
-    // Fetch the user's playlist list over spclient (NOT api.spotify.com, which
-    // 429s on the shared keymaster client_id). Response is playlist4 protobuf:
-    // a list of playlist URIs only -- names are resolved one-by-one afterwards
-    // by resolveNextName(), off-frame, then cached. Retry a few times: the
-    // Vita's DNS resolver is flaky on the FIRST lookup for a host (cold
-    // connection); once it resolves, keep-alive reuses it for the name fetches.
-    uint8_t *data = NULL;
-    int len = 0;
-    for (int attempt = 0; attempt < 3 && len <= 0; attempt++) {
-        if (data != NULL) {
-            free(data);
-            data = NULL;
-        }
-        len = gui->api.get_rootlist(&data, SPOTIFY_PLAYLIST_FETCH_CHUNK_SIZE);
-    }
-    if (len <= 0 || data == NULL) {
-        CSPOT_LOG(error, "rootlist request failed");
-        if (data != NULL) free(data);
-        return;
-    }
-
-    std::vector<std::string> ids = parseRootlist(data, static_cast<size_t>(len));
-    free(data);
-    if (ids.empty()) {
-        CSPOT_LOG(error, "rootlist parse: no playlists");
-        return;
-    }
-
-    rateLimited = false;
-    backoffStep = 0;
-    std::vector<Playlist> fresh;
-    for (const auto& id : ids) {
-        // Placeholder name until resolveNextName() fills it in; keep the full
-        // "spotify:playlist:<id>" URI so getTracks/play still work unchanged.
-        fresh.push_back({"\xE2\x80\xA6",  // horizontal ellipsis
-                         SPOTIFY_PLAYLIST_HEADER + id, {}, false});
-    }
-    playlists = std::move(fresh);
-    namesPending = true;
-    nameCursor = 0;
-    nameFailStreak = 0;
-    CSPOT_LOG(debug, "Rootlist: %d playlists, resolving names", playlists.size());
-}
-
-// One spclient playlist-detail fetch per call to resolve a display name. Walks
-// nameCursor through the list; when done, persists the named list to disk so
-// the next launch is instant with zero network.
-void PlaybackScreen::resolveNextName() {
-    if (!namesPending) {
-        return;
-    }
-    if (nameCursor >= static_cast<int>(playlists.size())) {
-        namesPending = false;
-        savePlaylistCache(playlists);
-        CSPOT_LOG(debug, "Playlist names resolved, cached");
-        return;
-    }
-
-    Playlist& pl = playlists[nameCursor];
-    std::string id = pl.uri;
-    if (id.rfind(SPOTIFY_PLAYLIST_HEADER, 0) == 0) {
-        id.erase(0, strlen(SPOTIFY_PLAYLIST_HEADER));
-    }
-
-    uint8_t *data = NULL;
-    int len = gui->api.get_playlist_detail(&data, id);
-    if (len > 0 && data != NULL) {
-        std::string name = parsePlaylistName(data, static_cast<size_t>(len));
-        pl.name = name.empty() ? std::string("Playlist") : name;
-        nameFailStreak = 0;
+        out += "]}";
     } else {
-        pl.name = "Playlist";
-        // spclient unreachable (DNS/network). Don't grind through all 45 -- that
-        // is what starved Mercury and crashed. Bail after a short streak; the
-        // user can retry via Settings > Refresh once the network settles.
-        if (++nameFailStreak >= 5) {
-            CSPOT_LOG(error, "name resolution: %d consecutive failures, aborting", nameFailStreak);
-            namesPending = false;
-            savePlaylistCache(playlists);
-            if (data != NULL) free(data);
-            return;
-        }
+        out += "null";
     }
-    if (data != NULL) free(data);
-    nameCursor++;
+    out += ",\"search\":{\"query\":" + json_quote(searchQuery) +
+           ",\"state\":" + json_quote(stateName(searchState)) +
+           ",\"results\":" + std::to_string(searchResults.size()) + "}}";
+    return out;
 }
 
-void PlaybackScreen::runSearch(const std::string& query) {
-    searchResults.clear();
-    searchPending = false;   // request done (success or fail); stop the spinner
-
-    uint8_t* data = NULL;
-    int len = gui->api.search(&data, query, "track", 10);
-    if (len <= 0 || data == NULL) {
-        if (data != NULL) free(data);
-        return;
-    }
-
-    cJSON* root = cJSON_Parse((const char *) data);
-    free(data);
-    if (root == NULL) {
-        return;
-    }
-
-    cJSON* tracks = cJSON_GetObjectItem(root, "tracks");
-    cJSON* items = tracks ? cJSON_GetObjectItem(tracks, "items") : NULL;
-    if (items != NULL) {
-        int n = cJSON_GetArraySize(items);
-        for (int i = 0; i < n; i++) {
-            cJSON* it = cJSON_GetArrayItem(items, i);
-            cJSON* name = cJSON_GetObjectItem(it, "name");
-            cJSON* uri = cJSON_GetObjectItem(it, "uri");
-            cJSON* artists = cJSON_GetObjectItem(it, "artists");
-
-            std::string artistName;
-            if (artists != NULL && cJSON_GetArraySize(artists) > 0) {
-                cJSON* a0 = cJSON_GetArrayItem(artists, 0);
-                cJSON* an = cJSON_GetObjectItem(a0, "name");
-                if (cJSON_IsString(an) && an->valuestring != NULL) {
-                    artistName = an->valuestring;
-                }
-            }
-            if (cJSON_IsString(name) && name->valuestring != NULL &&
-                cJSON_IsString(uri) && uri->valuestring != NULL) {
-                std::string lbl = std::string(name->valuestring);
-                if (!artistName.empty()) {
-                    lbl += "  -  " + artistName;
-                }
-                searchResults.push_back({lbl, std::string(uri->valuestring)});
+bool PlaybackScreen::debugCommand(const std::string &cmd, const std::string &arg) {
+    if (cmd == "tab") {
+        static const char *kTabs[] = {"library", "search", "log", "settings"};
+        for (int i = 0; i < 4; i++) {
+            if (arg == kTabs[i]) {
+                tab = static_cast<Tab>(i);
+                return true;
             }
         }
+        return false;
     }
-    cJSON_Delete(root);
+    if (cmd == "search") {
+        tab = Tab::SEARCH;
+        startSearch(arg);
+        return true;
+    }
+    if (cmd == "open") {
+        tab = Tab::LIBRARY;
+        openPlaylist(atoi(arg.c_str()));
+        return true;
+    }
+    if (cmd == "back") {
+        openIndex = -1;
+        return true;
+    }
+    if (cmd == "refresh") {
+        loadLibrary();
+        return true;
+    }
+    return false;
 }

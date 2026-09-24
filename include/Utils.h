@@ -35,6 +35,11 @@ extern "C" {
 typedef std::vector<std::string> Headers;
 
 bool LoadTextureFromFile(const char* filename, GLuint* out_texture, int* out_width, int* out_height);
+// Decode PNG/JPEG to RGBA8 on any thread, shrinking by an integer factor until
+// neither side exceeds max_side. Free the result with free().
+uint8_t *decode_image(const uint8_t *buf, size_t len, int max_side, int *w, int *h);
+// GUI thread: upload RGBA8 pixels to a new texture (0 on failure).
+GLuint texture_from_rgba(const uint8_t *rgba, int w, int h);
 bool LoadTextureFromMemory(const uint8_t* buffer, uint32_t length,
                            GLuint* out_texture, int* out_width, int* out_height);
 int is_dir(const char *path);
@@ -44,14 +49,21 @@ void term_network();
 // sceIo (open/write/close) so the trail survives a hang/GPU-wedge, unlike the
 // buffered text logger. Used to pin down where startup blocks on-device.
 void dbg_mark(const char *s);
+// True when ux0:data/cspot/loopback exists: every listening socket stays on
+// 127.0.0.1 and Zeroconf is skipped. Used under Vita3K, where a socket bound to
+// all interfaces would raise the Windows firewall prompt on the host.
+bool loopback_mode();
+// *status (optional) receives the HTTP status, or 0 when the transfer itself
+// failed (DNS, TLS, timeout).
 int download(const char *url, uint8_t **return_buffer, const char *method = "GET",
-                        std::string post_data = "", Headers headers = {});
+             std::string post_data = "", Headers headers = {}, long *status = nullptr);
 // GET over a PERSISTENT, reused curl handle (keep-alive). A burst of playlist
 // name lookups all hit the same host (spclient), so reusing one connection
 // means a single DNS resolve + TLS handshake instead of one per request. The
 // Vita's resolver chokes on rapid getaddrinfo bursts and the socket churn
 // starves the Mercury link into a crash; one reused connection avoids it.
-int spclient_get(const char *url, const std::string &bearer, uint8_t **return_buffer);
-bool cache_cover_art(std::string url, uint8_t *buffer, uint32_t length);
+int spclient_get(const char *url, const std::string &bearer, uint8_t **return_buffer,
+                 long *status = nullptr, const char *accept = nullptr);
+bool cache_cover_art(std::string url, const uint8_t *buffer, uint32_t length);
 std::string cover_art_path(std::string url);
 bool is_cover_cached(std::string url);

@@ -11,7 +11,10 @@
 
 #include <cstring>
 #include <cstdarg>
+#include <deque>
+#include <functional>
 #include <memory>
+#include <mutex>  // NOLINT
 #include <string>
 #include <utility>
 
@@ -26,7 +29,7 @@
 #include "CliFile.h"
 #include "VitaAudioSink.h"
 #include "PlaybackScreen.h"
-#include "Keyboard.h"
+#include "DevKit.h"
 #include "Utils.h"
 #include "GuiUtils.h"
 #include "Gui.h"
@@ -54,6 +57,30 @@ static int watch_id;
 static int cspot_id;
 static int zeroconf_id;
 
+// Player commands from the GUI (play/pause, next, prev, volume). SpircController
+// is not thread-safe and the cspot thread drives it through updateQueue, so the
+// GUI queues closures here and the cspot thread runs them between updates.
+static std::mutex cspot_cmd_mutex;
+static std::deque<std::function<void()>> cspot_cmds;
+
+static void queue_cspot(std::function<void()> fn) {
+    std::lock_guard<std::mutex> g(cspot_cmd_mutex);
+    if (cspot_cmds.size() < 32) {
+        cspot_cmds.push_back(std::move(fn));
+    }
+}
+
+static void run_cspot_cmds() {
+    std::deque<std::function<void()>> cmds;
+    {
+        std::lock_guard<std::mutex> g(cspot_cmd_mutex);
+        cmds.swap(cspot_cmds);
+    }
+    for (auto &c : cmds) {
+        c();
+    }
+}
+
 SceVoid watch_dog(SceSize _args, void *_argp) {
     GUI* gui = *((GUI**)_argp);
 
@@ -67,7 +94,11 @@ SceVoid watch_dog(SceSize _args, void *_argp) {
     SceAppMgrEvent appEvent;
 
     while (gui->isRunning) {
-        sceAppMgrReceiveEvent(&appEvent);
+        // No pending event leaves appEvent untouched: only act on a real one.
+        memset(&appEvent, 0, sizeof(appEvent));
+        if (sceAppMgrReceiveEvent(&appEvent) < 0) {
+            appEvent.event = 0;
+        }
         switch (appEvent.event) {
             case SCE_APP_EVENT_REQUEST_QUIT:
                 gui->isRunning = false;
@@ -113,8 +144,9 @@ int start_zeroconf(SceSize _args, void *_argp) {
 }
 
 void start_zeroconf_thread(GUI *gui) {
+    // 128 KB: the Zeroconf handshake runs a DH exchange and AES on this stack.
     zeroconf_id = sceKernelCreateThread("zeroconf", (SceKernelThreadEntry)start_zeroconf,
-                                        0x10000100, 0x10000, 0, 0, NULL);
+                                        0x10000100, 0x20000, 0, 0, NULL);
     sceKernelStartThread(zeroconf_id, sizeof(void*), &gui);
 }
 
@@ -180,28 +212,18 @@ int start_cspot(SceSize _args, void *_argp) {
             }
         });
 
-        // control CSpot from gui
+        // Control cspot from the GUI, through the command queue.
         gui->nextCallback = []() {
-            return spircController->nextSong();
+            queue_cspot([] { spircController->nextSong(); });
         };
-
         gui->prevCallback = []() {
-            return spircController->prevSong();
+            queue_cspot([] { spircController->prevSong(); });
         };
-
-        gui->activateDevice = []() {
-            // if (!spircController->state->isActive()) {
-            //     spircController->state->setActive(true);
-            // }
-            // return spircController->notify();
-        };
-
         gui->playToggleCallback = []() {
-            return spircController->playToggle();
+            queue_cspot([] { spircController->playToggle(); });
         };
-
         gui->volumeCallback = [](int v) {
-            return spircController->setVolume(v);
+            queue_cspot([v] { spircController->setVolume(v); });
         };
 
         mercuryManager->reconnectedCallback = []() {
@@ -219,11 +241,19 @@ int start_cspot(SceSize _args, void *_argp) {
         // credentials instead. Player controls run through spirc and don't need
         // the token, so this blocking fetch happens after they are wired.
         {
+            // The net worker re-mints the token through this when it expires
+            // (login5 tokens last one hour).
+            std::shared_ptr<LoginBlob> creds = blob;
+            gui->api.set_user(blob->username);  // needed for the spclient rootlist URL
+            gui->api.set_refresher([creds](int *expiresIn) {
+                return login5_get_access_token(CLIENT_ID_ANDROID, DEVICE_ID, USER_AGENT,
+                                               creds->username, creds->authData, expiresIn);
+            });
+            int expiresIn = 0;
             std::string accessToken = login5_get_access_token(
-                CLIENT_ID_ANDROID, DEVICE_ID, USER_AGENT, blob->username, blob->authData);
+                CLIENT_ID_ANDROID, DEVICE_ID, USER_AGENT, blob->username, blob->authData, &expiresIn);
             if (!accessToken.empty()) {
-                gui->api.set_token(accessToken);
-                gui->api.set_user(blob->username);  // needed for the spclient rootlist URL
+                gui->api.set_token(accessToken, expiresIn);
             } else {
                 CSPOT_LOG(error, "login5: no Web API token; in-app browsing disabled");
             }
@@ -239,6 +269,7 @@ int start_cspot(SceSize _args, void *_argp) {
             // separate recv (runTask) thread owns reconnection and rebuilds the
             // session on its own, so here we just drop the failed dispatch.
             try {
+                run_cspot_cmds();
                 mercuryManager->updateQueue();
             } catch (const std::exception& e) {
                 CSPOT_LOG(error, "updateQueue exception contained: %s", e.what());
@@ -254,14 +285,17 @@ int start_cspot(SceSize _args, void *_argp) {
     // still running, the credentials were declined (e.g. a stale cached blob):
     // drop to the waiting screen and (re)start Zeroconf so the user can re-pair.
     gui->set_screen(gui->login_screen);
-    if (gui->isRunning && zeroconf_id == 0) {
+    if (gui->isRunning && zeroconf_id == 0 && !loopback_mode()) {
         start_zeroconf_thread(gui);
     }
     return 0;
 }
 
 void start_cspot_thread(GUI *gui) {
-    cspot_id = sceKernelCreateThread("cspot", (SceKernelThreadEntry)start_cspot, 0x10000100, 0x10000, 0, 0, NULL);
+    // 256 KB: session auth (DH, Shannon), login5 over curl/OpenSSL and the
+    // hashcash solver all run on this thread; 64 KB was one deep call away
+    // from a silent stack overflow.
+    cspot_id = sceKernelCreateThread("cspot", (SceKernelThreadEntry)start_cspot, 0x10000100, 0x40000, 0, 0, NULL);
     sceKernelStartThread(cspot_id, sizeof(void*), &gui);
 }
 
@@ -278,9 +312,10 @@ class MenuLogger : public bell::AbstractLogger {
         if (slash) {
             base = slash + 1;
         }
-        print_to_menu("%c %s:%d: ", level, base, line);
-        vprint_to_menu(format, args);
-        print_to_menu("\n");
+        // One call per line: three separate calls interleaved between threads.
+        char msg[768];
+        vsnprintf(msg, sizeof(msg), format, args);
+        print_to_menu("%c %s:%d: %s\n", level, base, line, msg);
     }
 
  public:
@@ -337,6 +372,7 @@ int main(void) {
     dbg_mark("05-config");
 
     gui.init();
+    DevKit::start(&gui);
     dbg_mark("06-gui-init-done");
 
     std::string authData;
@@ -379,7 +415,11 @@ int main(void) {
     } else {
         // Show the "waiting for Spotify Connect" screen and start advertising.
         gui.set_screen(gui.login_screen);
-        start_zeroconf_thread(&gui);
+        if (loopback_mode()) {
+            CSPOT_LOG(info, "loopback mode: Zeroconf not started");
+        } else {
+            start_zeroconf_thread(&gui);
+        }
     }
     dbg_mark(autoLogin ? "07-thread-autologin" : "07-thread-zeroconf");
 
