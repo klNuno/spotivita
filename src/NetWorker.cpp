@@ -1,6 +1,7 @@
 #include "NetWorker.h"
-#include <psp2/kernel/threadmgr.h>
+#include "Utils.h"
 #include <Logger.h>
+#include <deque>
 #include <exception>
 #include <utility>
 
@@ -9,16 +10,15 @@
 static const int NET_STACK_SIZE = 0x80000;
 
 void NetWorker::start() {
-    SceUID id = sceKernelCreateThread("net", (SceKernelThreadEntry) threadMain,
-                                      0x10000100, NET_STACK_SIZE, 0, 0, NULL);
-    NetWorker *self = this;
-    sceKernelStartThread(id, sizeof(self), &self);
+    // A pthread, not sceKernelCreateThread: loop() waits on cv_ (see Utils.h).
+    if (!start_pthread(threadMain, this, NET_STACK_SIZE)) {
+        CSPOT_LOG(error, "net worker: thread creation failed");
+    }
 }
 
-int NetWorker::threadMain(unsigned int, void *argp) {
-    NetWorker *self = *static_cast<NetWorker **>(argp);
-    self->loop();
-    return 0;
+void *NetWorker::threadMain(void *arg) {
+    static_cast<NetWorker *>(arg)->loop();
+    return nullptr;
 }
 
 void NetWorker::post(Job job, bool urgent) {

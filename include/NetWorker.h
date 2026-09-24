@@ -34,7 +34,7 @@ class NetWorker {
     bool busy() const { return pending_.load() > 0; }
 
  private:
-    static int threadMain(unsigned int args, void *argp);
+    static void *threadMain(void *arg);
     void loop();
 
     std::mutex mutex_;

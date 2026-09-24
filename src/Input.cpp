@@ -5,8 +5,7 @@
 #include <psp2/system_param.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/touch.h>
-#include <imgui_vita.h>
-#include <vitaGL.h>
+#include <imgui_vita2d/imgui.h>
 #include <cfloat>
 #include <cmath>
 #include <cstring>
@@ -187,7 +186,6 @@ void new_frame(bool acceptInput) {
     g_prev = f;
 
     ImGui::NewFrame();
-    vglIndexPointerDefault();
 }
 
 void scroll_area() {

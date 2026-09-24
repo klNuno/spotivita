@@ -4,6 +4,7 @@
 #include <psp2/sysmodule.h>
 #include <psp2/io/stat.h>
 #include <psp2/io/fcntl.h>
+#include <pthread.h>
 #include <cstring>
 #include <string>
 #include <Logger.h>
@@ -233,75 +234,19 @@ int spclient_get(const char *url, const std::string &bearer, uint8_t **return_bu
     return static_cast<int>(chunk.size);
 }
 
-// Simple helper function to load an image into a OpenGL texture with common settings
-bool LoadTextureFromFile(const char* filename, GLuint* out_texture, int* out_width, int* out_height) {
-    int image_width = 0;
-    int image_height = 0;
-    unsigned char* image_data = stbi_load(filename, &image_width, &image_height, NULL, 4);
-    if (image_data == NULL)
+bool LoadTextureFromFile(const char* filename, vita2d_texture** out_texture, int* out_width, int* out_height) {
+    int w = 0, h = 0;
+    unsigned char* pixels = stbi_load(filename, &w, &h, NULL, 4);
+    if (pixels == NULL) {
         return false;
-
-    // Create a OpenGL texture identifier
-    GLuint image_texture;
-    glGenTextures(1, &image_texture);
-    glBindTexture(GL_TEXTURE_2D, image_texture);
-
-    // Setup filtering parameters for display
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    // This is required on WebGL for non power-of-two textures
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    // Same
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    // Upload pixels into texture
-#if defined(GL_UNPACK_ROW_LENGTH) && !defined(__EMSCRIPTEN__)
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-#endif
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image_width, image_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
-    stbi_image_free(image_data);
-
-    *out_texture = image_texture;
-    *out_width = image_width;
-    *out_height = image_height;
-
-    return true;
-}
-
-// Simple helper function to load an image into a OpenGL texture with common settings
-bool LoadTextureFromMemory(const uint8_t* buffer, uint32_t length,
-                           GLuint* out_texture, int* out_width, int* out_height) {
-    int image_width = 0;
-    int image_height = 0;
-    unsigned char* image_data = stbi_load_from_memory(buffer, length, &image_width, &image_height, NULL, 4);
-
-    if (image_data == NULL)
+    }
+    *out_texture = Render::texture_from_rgba(pixels, w, h);
+    stbi_image_free(pixels);
+    if (*out_texture == nullptr) {
         return false;
-
-    // Create a OpenGL texture identifier
-    GLuint image_texture;
-    glGenTextures(1, &image_texture);
-    glBindTexture(GL_TEXTURE_2D, image_texture);
-
-    // Setup filtering parameters for display
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    // This is required on WebGL for non power-of-two textures
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    // Same
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    // Upload pixels into texture
-#if defined(GL_UNPACK_ROW_LENGTH) && !defined(__EMSCRIPTEN__)
-    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-#endif
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image_width, image_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data);
-    stbi_image_free(image_data);
-
-    *out_texture = image_texture;
-    *out_width = image_width;
-    *out_height = image_height;
-
+    }
+    *out_width = w;
+    *out_height = h;
     return true;
 }
 
@@ -346,19 +291,15 @@ uint8_t *decode_image(const uint8_t *buf, size_t len, int max_side, int *w, int 
     return out;
 }
 
-GLuint texture_from_rgba(const uint8_t *rgba, int w, int h) {
-    if (rgba == NULL || w <= 0 || h <= 0) {
-        return 0;
-    }
-    GLuint tex = 0;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-    return tex;
+bool start_pthread(void *(*fn)(void *), void *arg, size_t stack_size) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, stack_size);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t tid;
+    int rc = pthread_create(&tid, &attr, fn, arg);
+    pthread_attr_destroy(&attr);
+    return rc == 0;
 }
 
 int is_dir(const char *path) {

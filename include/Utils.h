@@ -1,7 +1,6 @@
 #pragma once
 
-#include <imgui_vita.h>
-#include <vitaGL.h>
+#include "Render.h"
 #include <string>
 #include <vector>
 #include <utility>
@@ -34,14 +33,11 @@ extern "C" {
 // HTTP Headers
 typedef std::vector<std::string> Headers;
 
-bool LoadTextureFromFile(const char* filename, GLuint* out_texture, int* out_width, int* out_height);
+// GUI thread: PNG/JPEG file to a new texture.
+bool LoadTextureFromFile(const char* filename, vita2d_texture** out_texture, int* out_width, int* out_height);
 // Decode PNG/JPEG to RGBA8 on any thread, shrinking by an integer factor until
 // neither side exceeds max_side. Free the result with free().
 uint8_t *decode_image(const uint8_t *buf, size_t len, int max_side, int *w, int *h);
-// GUI thread: upload RGBA8 pixels to a new texture (0 on failure).
-GLuint texture_from_rgba(const uint8_t *rgba, int w, int h);
-bool LoadTextureFromMemory(const uint8_t* buffer, uint32_t length,
-                           GLuint* out_texture, int* out_width, int* out_height);
 int is_dir(const char *path);
 bool init_network();
 void term_network();
@@ -53,6 +49,11 @@ void dbg_mark(const char *s);
 // 127.0.0.1 and Zeroconf is skipped. Used under Vita3K, where a socket bound to
 // all interfaces would raise the Windows firewall prompt on the host.
 bool loopback_mode();
+// Detached thread through pthread-embedded. Any thread that waits on a
+// std::condition_variable must be created this way: pthread_cond_wait checks
+// cancellation through the calling thread's pthread record, which a raw
+// sceKernelCreateThread thread does not have (NULL write, then a crash).
+bool start_pthread(void *(*fn)(void *), void *arg, size_t stack_size);
 // *status (optional) receives the HTTP status, or 0 when the transfer itself
 // failed (DNS, TLS, timeout).
 int download(const char *url, uint8_t **return_buffer, const char *method = "GET",

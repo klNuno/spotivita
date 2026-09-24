@@ -2,6 +2,7 @@
 
 #include "Screen.h"
 #include "GuiUtils.h"
+#include "Render.h"
 
 class LoginScreen: public Screen {
  public:
@@ -11,5 +12,5 @@ class LoginScreen: public Screen {
  private:
     int logo_width = 0;
     int logo_height = 0;
-    GLuint logo_tex = 0;
+    vita2d_texture *logo_tex = nullptr;
 };

@@ -9,7 +9,7 @@
 // storage) mid-render: a use-after-free that only the no-op mutex hid. Now all
 // access goes through log_mutex and the GUI renders its own copy.
 static const size_t LOG_KEEP_BYTES = 16 * 1024;
-static std::string s_log;
+static std::string s_log;  // NOLINT(runtime/string): guarded by log_mutex
 static unsigned s_logVersion = 0;
 static FILE *logger_fp = NULL;
 static std::mutex log_mutex;

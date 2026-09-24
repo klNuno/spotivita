@@ -5,12 +5,13 @@
 #include <psp2/ctrl.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/io/fcntl.h>
-#include <vitaGL.h>
+#include <psp2/io/stat.h>
 
 #include <curl/curl.h>
 
 #include <cstring>
 #include <cstdarg>
+#include <cstdio>
 #include <deque>
 #include <functional>
 #include <memory>

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <imgui_vita.h>
+#include <imgui_vita2d/imgui.h>
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -19,7 +19,7 @@ class GUI {
     std::atomic<bool> isRunning{true};
     // A Vita app is already foreground-active at cold launch and gets no initial
     // ON_ACTIVATE event, so paused MUST start false. Starting true deadlocked the
-    // render loop before its first vglSwapBuffers, holding the GPU and wedging the
+    // render loop before its first buffer swap, holding the GPU and wedging the
     // whole system (other apps crash, shutdown hangs). The watchdog flips this on
     // real background/foreground transitions afterwards.
     std::atomic<bool> paused{false};

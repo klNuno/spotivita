@@ -1,7 +1,7 @@
 #pragma once
 
-#include <imgui_vita.h>
-#include <vitaGL.h>
+#include <imgui_vita2d/imgui.h>
+#include "Render.h"
 #include <atomic>
 #include <string>
 #include <vector>
@@ -71,8 +71,8 @@ class PlaybackScreen: public Screen {
 
     // Cover art. placeholder_tex is the bundled default; cover_art_tex points at
     // it until a real cover loads, and the old texture is freed on each change.
-    GLuint placeholder_tex = 0;
-    GLuint cover_art_tex = 0;
+    vita2d_texture *placeholder_tex = nullptr;
+    vita2d_texture *cover_art_tex = nullptr;
     std::string coverUrl;          // url of the cover shown or being fetched
 
     // Library

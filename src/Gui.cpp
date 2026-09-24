@@ -12,6 +12,7 @@
 #include "GuiUtils.h"
 #include "Input.h"
 #include "Keyboard.h"
+#include "Render.h"
 #include "Utils.h"
 #include "Font.h"
 #include "PlaybackScreen.h"
@@ -19,8 +20,7 @@
 
 namespace {
 
-// imgui-vita ships Dear ImGui ~1.61 (2018): none of the modern idle helpers
-// exist, so frame-gate by hand. After the last input event, keep rendering a few
+// Dear ImGui 1.79 has no idle-frame helper, so frame-gate by hand. After the last input event, keep rendering a few
 // frames (popups/combos take ~4 to settle), then stop building until something
 // changes. This -- not a lighter toolkit or a slower clock -- is what makes the
 // app sip power: a static UI does ~no CPU build and ~no GPU work.
@@ -110,25 +110,13 @@ void applySpotifyTheme() {
 }  // namespace
 
 void GUI::init() {
-    // 4X MSAA: wasteful for a flat UI, but it is the exact init the app has
-    // years of on-device proof with (incl. the patched vitaGL toolchain build).
-    // Switch to NONE only after verifying it boots on hardware -- the init path
-    // is too fragile to change blind.
-    vglInitExtended(0, 960, 544, 0x800000, SCE_GXM_MULTISAMPLE_4X);
-
-    // vitaGL doesn't seed a viewport; set it here and again every frame.
-    glViewport(0, 0, 960, 544);
-    glScissor(0, 0, 960, 544);
+    // vita2d, no MSAA: ImGui already anti-aliases its shapes through the atlas.
+    Render::init();
 
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
-    // Init allocates the backend's vertex pools. Input and frame setup are ours
-    // (Input::new_frame); the backend only renders.
-    ImGui_ImplVitaGL_Init();
-    ImGui_ImplVitaGL_TouchUsage(false);
-    ImGui_ImplVitaGL_GamepadUsage(false);
-    ImGui_ImplVitaGL_MouseStickUsage(false);
     io.IniFilename = NULL;   // no imgui.ini written next to the app
+    io.LogFilename = NULL;
 
     font = AddDefaultFont(26);
     log_font = AddDefaultFont(14);
@@ -152,9 +140,7 @@ void GUI::init() {
     icon_font = io.Fonts->AddFontFromFileTTF(FONT_ICON_FILE_NAME_FAS, 40.0f, NULL, ranges);
     playback_icon_font = io.Fonts->AddFontFromFileTTF(FONT_ICON_FILE_NAME_FAS, 58.0f, NULL, playback_ranges);
     io.Fonts->Build();
-    // The backend created the font texture lazily in its NewFrame, which we no
-    // longer call.
-    ImGui_ImplVitaGL_CreateDeviceObjects();
+    Render::upload_fonts();
 
     applySpotifyTheme();
     Input::init();
@@ -175,11 +161,16 @@ void GUI::drawToast() {
         return;
     }
     const float wrap = 760.0f;
-    ImDrawList *dl = ImGui::GetOverlayDrawList();
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
     ImVec2 ts = font->CalcTextSizeA(font->FontSize, FLT_MAX, wrap, toastText.c_str());
     ImVec2 pad(20.0f, 12.0f);
     ImVec2 size(ts.x + pad.x * 2.0f, ts.y + pad.y * 2.0f);
-    ImVec2 p0((960.0f - size.x) * 0.5f, 544.0f - size.y - 24.0f);
+    // Over the right pane, above the tab row, so the scrubber and its times
+    // stay visible. Wide toasts slide left as far as the screen edge.
+    float x = 692.0f - size.x * 0.5f;
+    if (x + size.x > 944.0f) x = 944.0f - size.x;
+    if (x < 16.0f) x = 16.0f;
+    ImVec2 p0(x, 544.0f - size.y - 96.0f);
     dl->AddRectFilled(p0, ImVec2(p0.x + size.x, p0.y + size.y), IM_COL32(48, 48, 48, 245), 10.0f);
     dl->AddText(font, font->FontSize, ImVec2(p0.x + pad.x, p0.y + pad.y),
                 IM_COL32(255, 255, 255, 255), toastText.c_str(), NULL, wrap);
@@ -214,6 +205,12 @@ bool GUI::debugCommand(const std::string &cmd, const std::string &arg) {
     if (cmd == "toast") {
         toast(arg);
         return true;
+    }
+    // Lets the playback UI be exercised without a Spotify login (Vita3K).
+    if (cmd == "screen") {
+        Screen *target = arg == "login" ? login_screen : arg == "playback" ? playback_screen : nullptr;
+        if (target != nullptr) set_screen(target);
+        return target != nullptr;
     }
     Screen *current = screen.load();
     return current != nullptr && current->debugCommand(cmd, arg);
@@ -250,8 +247,6 @@ void GUI::start() {
         // Interaction: render every vsync'd frame (60 fps). Static UI: drop to
         // ~10 fps full rebuilds (spinners and the scrubber still move).
         if (wake > 0 || (now - last_present) >= IDLE_FRAME_US) {
-            glViewport(0, 0, 960, 544);
-            glScissor(0, 0, 960, 544);
             // While the IME is up it owns the touch screen and the buttons.
             Input::new_frame(!dialog);
             ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
@@ -267,11 +262,9 @@ void GUI::start() {
             ImGui::End();
             drawToast();
             ImGui::Render();
-            glClearColor(0.07f, 0.07f, 0.07f, 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
-            ImGui_ImplVitaGL_RenderDrawData(ImGui::GetDrawData());
-            // GL_TRUE lets the system draw its common dialog (IME) over us.
-            vglSwapBuffers(dialog ? GL_TRUE : GL_FALSE);
+            Render::begin_frame();
+            Render::draw(ImGui::GetDrawData());
+            Render::end_frame(dialog);
             if (dialog) {
                 Keyboard::Poll();
             }

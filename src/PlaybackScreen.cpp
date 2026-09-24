@@ -192,7 +192,10 @@ std::vector<Playlist> loadPlaylistCache() {
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (n <= 0) { fclose(f); return out; }
+    if (n <= 0) {
+        fclose(f);
+        return out;
+    }
     std::string buf(static_cast<size_t>(n), '\0');
     size_t rd = fread(&buf[0], 1, static_cast<size_t>(n), f);
     fclose(f);
@@ -272,38 +275,47 @@ void pruneCoverCache() {
 //   SelectedListContent: attributes=3 (ListAttributes.name=1), contents=5
 //   ListItems.items=3, Item.uri=1
 //   metadata Track: name=2, artist=4 (Artist.name=2)
+// Reads one base-128 varint; false on truncation or overflow.
+bool pbVarint(const uint8_t** p, const uint8_t* end, uint64_t* v) {
+    *v = 0;
+    for (int sh = 0; *p < end && sh < 64; sh += 7) {
+        uint8_t b = *(*p)++;
+        *v |= static_cast<uint64_t>(b & 0x7F) << sh;
+        if (!(b & 0x80)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::vector<std::pair<const uint8_t*, size_t>> pbLenFields(
         const uint8_t* p, const uint8_t* end, int want) {
     std::vector<std::pair<const uint8_t*, size_t>> out;
-    while (p < end) {
-        uint64_t key = 0; int sh = 0; bool ok = false;
-        while (p < end) {
-            uint8_t b = *p++;
-            if (sh >= 64) { ok = false; break; }
-            key |= static_cast<uint64_t>(b & 0x7F) << sh;
-            if (!(b & 0x80)) { ok = true; break; }
-            sh += 7;
-        }
-        if (!ok) break;
+    uint64_t key = 0;
+    while (p < end && pbVarint(&p, end, &key)) {
         int field = static_cast<int>(key >> 3), wt = static_cast<int>(key & 7);
+        uint64_t len = 0;
         if (wt == 2) {
-            uint64_t len = 0; sh = 0; ok = false;
-            while (p < end) {
-                uint8_t b = *p++;
-                if (sh >= 64) { ok = false; break; }
-                len |= static_cast<uint64_t>(b & 0x7F) << sh;
-                if (!(b & 0x80)) { ok = true; break; }
-                sh += 7;
+            if (!pbVarint(&p, end, &len) || len > static_cast<uint64_t>(end - p)) {
+                break;
             }
-            if (!ok || len > static_cast<uint64_t>(end - p)) break;
-            if (field == want) out.push_back({p, static_cast<size_t>(len)});
-            p += len;
+            if (field == want) {
+                out.push_back({p, static_cast<size_t>(len)});
+            }
         } else if (wt == 0) {
-            while (p < end && (*p & 0x80)) p++;
-            if (p < end) p++;
-        } else if (wt == 5) { if (end - p < 4) break; p += 4; }
-        else if (wt == 1) { if (end - p < 8) break; p += 8; }
-        else break;
+            if (!pbVarint(&p, end, &len)) {
+                break;
+            }
+            len = 0;
+        } else if (wt == 5 || wt == 1) {
+            len = wt == 5 ? 4 : 8;
+            if (static_cast<uint64_t>(end - p) < len) {
+                break;
+            }
+        } else {
+            break;
+        }
+        p += len;
     }
     return out;
 }
@@ -391,12 +403,10 @@ PlaybackScreen::PlaybackScreen(GUI *gui) : Screen(gui) {
 }
 
 PlaybackScreen::~PlaybackScreen() {
-    if (cover_art_tex != placeholder_tex && cover_art_tex != 0) {
-        glDeleteTextures(1, &cover_art_tex);
+    if (cover_art_tex != placeholder_tex) {
+        Render::free_texture(cover_art_tex);
     }
-    if (placeholder_tex != 0) {
-        glDeleteTextures(1, &placeholder_tex);
-    }
+    Render::free_texture(placeholder_tex);
 }
 
 void PlaybackScreen::tick() {
@@ -434,10 +444,10 @@ void PlaybackScreen::fetchCover(const std::string &url) {
         }
         g->net.deliver([this, url, rgba, w, h] {
             if (rgba != NULL && url == coverUrl) {
-                GLuint tex = texture_from_rgba(rgba, w, h);
-                if (tex != 0) {
-                    if (cover_art_tex != placeholder_tex && cover_art_tex != 0) {
-                        glDeleteTextures(1, &cover_art_tex);
+                vita2d_texture *tex = Render::texture_from_rgba(rgba, w, h);
+                if (tex != nullptr) {
+                    if (cover_art_tex != placeholder_tex) {
+                        Render::free_texture(cover_art_tex);
                     }
                     cover_art_tex = tex;
                 }
@@ -754,7 +764,7 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
 
     ImGui::Dummy(ImVec2(0.0f, 6.0f));
     ImGui::SetCursorPosX((paneW - coverSz) * 0.5f);
-    ImGui::Image((void*)(intptr_t)cover_art_tex, ImVec2(coverSz, coverSz));
+    ImGui::Image(Render::tex_id(cover_art_tex), ImVec2(coverSz, coverSz));
 
     ImGui::Dummy(ImVec2(0.0f, 12.0f));
 
@@ -998,7 +1008,7 @@ void PlaybackScreen::drawLog() {
     ImGui::PopFont();
     // Follow the tail unless the user scrolled up to read.
     if (grew && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 40.0f) {
-        ImGui::SetScrollHere(1.0f);
+        ImGui::SetScrollHereY(1.0f);
     }
 }
 

@@ -6,7 +6,7 @@
 // Non-blocking system IME dialog. The old GetText() ran its own render loop from
 // inside an ImGui frame (a button handler), so the frame stayed open for as long
 // as the keyboard was up. Now the dialog is opened, the GUI loop keeps running
-// and presents with vglSwapBuffers(GL_TRUE) while it is visible, and the result
+// and lets vita2d draw the system dialog over each frame while it is visible, and the result
 // arrives through the callback.
 namespace Keyboard {
 

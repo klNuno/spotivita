@@ -1,5 +1,19 @@
 #include "DevKit.h"
 
+// Standard headers stay outside the #ifdef: cpplint does not look inside it.
+#include <condition_variable>  // NOLINT
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <functional>
+#include <memory>
+#include <mutex>  // NOLINT
+#include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
+
 #ifdef PSVITIFY_DEVKIT
 
 #include <psp2/appmgr.h>
@@ -13,17 +27,6 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <Logger.h>
-#include <condition_variable>  // NOLINT
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <deque>
-#include <functional>
-#include <memory>
-#include <mutex>  // NOLINT
-#include <sstream>
-#include <string>
-#include <vector>
 #include "Gui.h"
 #include "GuiUtils.h"
 #include "Input.h"
@@ -115,7 +118,8 @@ bool readFile(const std::string &path, std::string *out) {
 }
 
 // Displayed framebuffer -> 24-bit BMP. Reads what is on screen right now from
-// any thread, without touching GL.
+// any thread, without touching the GPU. Returns false on an all-black frame:
+// Vita3K renders on the host and never writes the guest framebuffer back.
 bool screenshot(std::string *bmp) {
     SceDisplayFrameBuf fb;
     memset(&fb, 0, sizeof(fb));
@@ -141,17 +145,19 @@ bool screenshot(std::string *bmp) {
     put16(28, 24);
     put32(34, dataSize);
     const uint32_t *src = static_cast<const uint32_t *>(fb.base);
+    uint32_t any = 0;
     for (int y = 0; y < h; y++) {
         const uint32_t *row = src + static_cast<size_t>(h - 1 - y) * fb.pitch;
         uint8_t *dst = o + 54 + static_cast<size_t>(y) * rowBytes;
         for (int x = 0; x < w; x++) {
             uint32_t px = row[x];            // A8B8G8R8: R in the low byte
+            any |= px & 0xFFFFFF;
             dst[x * 3 + 0] = (px >> 16) & 0xFF;
             dst[x * 3 + 1] = (px >> 8) & 0xFF;
             dst[x * 3 + 2] = px & 0xFF;
         }
     }
-    return true;
+    return any != 0;
 }
 
 uint32_t buttonMask(const std::string &names) {
@@ -222,7 +228,7 @@ void serve(int fd) {
             if (screenshot(&bmp)) {
                 sendBlob(fd, bmp);
             } else {
-                sendText(fd, "ERR no framebuffer\n");
+                sendText(fd, "ERR framebuffer unreadable or blank (under Vita3K use vita3k.ps1 shot)\n");
             }
         } else if (cmd == "log") {
             size_t bytes = 8192;
@@ -272,11 +278,11 @@ void serve(int fd) {
     }
 }
 
-int serverMain(SceSize, void *) {
+void *serverMain(void *) {
     int listener = socket(AF_INET, SOCK_STREAM, 0);
     if (listener < 0) {
         CSPOT_LOG(error, "devkit: socket failed");
-        return 0;
+        return nullptr;
     }
     int yes = 1;
     setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
@@ -289,13 +295,17 @@ int serverMain(SceSize, void *) {
         listen(listener, 2) < 0) {
         CSPOT_LOG(error, "devkit: cannot listen on %d", PORT);
         close(listener);
-        return 0;
+        return nullptr;
     }
     CSPOT_LOG(info, "devkit: listening on port %d", PORT);
     // Blocking accept loop: vitasdk's select() never reports a listening
     // socket readable (same trap as bell's HTTPServer, see patch/bell).
     while (true) {
-        int fd = accept(listener, NULL, NULL);
+        // Real out-parameters: Vita3K's accept() writes them unconditionally
+        // and a NULL here crashed the whole emulator on the first connection.
+        sockaddr_in peer;
+        socklen_t peerLen = sizeof(peer);
+        int fd = accept(listener, reinterpret_cast<sockaddr *>(&peer), &peerLen);
         if (fd < 0) {
             sceKernelDelayThread(100000);
             continue;
@@ -303,17 +313,15 @@ int serverMain(SceSize, void *) {
         serve(fd);
         close(fd);
     }
-    return 0;
+    return nullptr;
 }
 
 }  // namespace
 
 void start(GUI *gui) {
     g_gui = gui;
-    SceUID id = sceKernelCreateThread("devkit", serverMain, 0x10000100, 0x10000, 0, 0, NULL);
-    if (id >= 0) {
-        sceKernelStartThread(id, 0, NULL);
-    }
+    // A pthread: its callOnGui waits on a std::condition_variable.
+    start_pthread(serverMain, nullptr, 0x10000);
 }
 
 bool pump(GUI *) {

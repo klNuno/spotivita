@@ -1,7 +1,6 @@
 #pragma once
 
-#include <imgui_vita.h>
-#include <vitaGL.h>
+#include <imgui_vita2d/imgui.h>
 #include <string>
 
 #define PLAY_BUTTON_BACKGROUND        IM_COL32(255, 255, 255, 255)

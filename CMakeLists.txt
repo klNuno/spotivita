@@ -29,7 +29,14 @@ set(CMAKE_CXX_STANDARD 20)
 # std::lock_guard / std::condition_variable silently becomes a no-op (and
 # std::thread throws "Enable multithreading"). That broke the audio ring buffer,
 # PlayerModel and cspot's Mercury/Shannon locking. Force the symbol in.
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--undefined=pthread_cancel")
+# The rest of gthr-posix.h is weak too: once threads count as active, nothing
+# pulled pthread_cond_* or pthread_once in either, so std::condition_variable
+# and std::call_once jumped to address 0 (found under Vita3K). Force them all;
+# check with `nm cspot_vita | grep " w pthread"`, only the stack hook may stay.
+foreach(_sym pthread_cancel pthread_once pthread_cond_wait pthread_cond_timedwait
+             pthread_cond_signal pthread_cond_broadcast pthread_cond_destroy)
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--undefined=${_sym}")
+endforeach()
 
 # --- Patch the pinned cspot/bell submodule for the Vita toolchain ---------
 # The cspot submodule is pinned at an old commit; these overrides are applied
@@ -129,6 +136,7 @@ add_executable(${PROJECT_NAME}
   src/LoginScreen.cpp
   src/GuiUtils.cpp
   src/Input.cpp
+  src/Render.cpp
   src/NetWorker.cpp
   src/DevKit.cpp
   src/Compat.c
@@ -149,12 +157,9 @@ target_link_libraries(${PROJECT_NAME}
   m
   SceAudio_stub
   SceShellSvc_stub
-  imgui
-  freetype
-  pthread
-  vitaGL
-  vitashark
-  mathneon
+  # Dear ImGui 1.79 core plus the two precompiled GXP shaders (src/Render.cpp).
+  imgui_vita2d
+  vita2d
   SceAppMgr_stub
   SceAppUtil_stub
   SceCommonDialog_stub
@@ -164,8 +169,6 @@ target_link_libraries(${PROJECT_NAME}
   SceKernelDmacMgr_stub
   SceLibKernel_stub
   ScePower_stub
-  SceShaccCg_stub
-  SceShaccCgExt
   SceSysmodule_stub
   SceTouch_stub
   taihen_stub
