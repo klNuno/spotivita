@@ -7,123 +7,112 @@
 
 namespace bell
 {
+    // Vita replacement for bell's std::condition_variable queue, on kernel
+    // mutex + cond. Waiters check the queue under the lock before sleeping and
+    // push signals while holding it, so a push can never slip between the
+    // check and the wait. The old version waited unconditionally: a signal sent
+    // before the wait was lost and audio chunk data sat in the queue.
     template <typename dataType>
     class Queue
     {
     private:
-        /// Queue
         std::queue<dataType> m_queue;
-        /// Mutex to controll multiple access
-        int mutexid = sceKernelCreateMutex("m_mutex", 0, 1, NULL);
-        /// Conditional variable used to fire event
-        int m_cv = sceKernelCreateCond("cond_var", 0, mutexid, NULL);;
-        /// Atomic variable used to terminate immediately wpop and wtpop functions
+        int mutexid = sceKernelCreateMutex("bell_queue_mtx", 0, 0, NULL);
+        int m_cv = sceKernelCreateCond("bell_queue_cv", 0, mutexid, NULL);
+        /// Set by clear() to release wpop and wtpop immediately
         std::atomic<bool> m_forceExit = false;
 
     public:
-        /// <summary> Add a new element in the queue. </summary>
-        /// <param name="data"> New element. </param>
         void push(dataType const &data)
         {
             m_forceExit.store(false);
-            sceKernelLockMutex(mutexid, 0, 0);
+            sceKernelLockMutex(mutexid, 1, NULL);
             m_queue.push(data);
-            sceKernelUnlockMutex(mutexid, 0);
             sceKernelSignalCond(m_cv);
+            sceKernelUnlockMutex(mutexid, 1);
         }
-        /// <summary> Check queue empty. </summary>
-        /// <returns> True if the queue is empty. </returns>
+
         bool isEmpty() const
         {
-            sceKernelLockMutex(mutexid, 0, 0);
+            sceKernelLockMutex(mutexid, 1, NULL);
             bool tmp = m_queue.empty();
-            sceKernelUnlockMutex(mutexid, 0);
+            sceKernelUnlockMutex(mutexid, 1);
             return tmp;
         }
-        /// <summary> Pop element from queue. </summary>
-        /// <param name="popped_value"> [in,out] Element. </param>
-        /// <returns> false if the queue is empty. </returns>
+
+        /// Returns false if the queue is empty.
         bool pop(dataType &popped_value)
         {
-            sceKernelLockMutex(mutexid, 0, 0);
-            if (m_queue.empty())
-            {
-                sceKernelUnlockMutex(mutexid, 0);
-                return false;
-            }
-            else
+            sceKernelLockMutex(mutexid, 1, NULL);
+            bool ok = !m_queue.empty();
+            if (ok)
             {
                 popped_value = m_queue.front();
                 m_queue.pop();
-                sceKernelUnlockMutex(mutexid, 0);
-                return true;
             }
+            sceKernelUnlockMutex(mutexid, 1);
+            return ok;
         }
-        /// <summary> Wait and pop an element in the queue. </summary>
-        /// <param name="popped_value"> [in,out] Element. </param>
-        ///  <returns> False for forced exit. </returns>
+
+        /// Waits for an element. Returns false on forced exit.
         bool wpop(dataType &popped_value)
         {
-            sceKernelLockMutex(mutexid, 0, 0);
-            // m_cv.wait(lk, [&]() -> bool
-                    //   { return !m_queue.empty() || m_forceExit.load(); });
-            uint32_t us = 0;
-            sceKernelWaitCond(m_cv, &us);
-            if (m_forceExit.load()) {
-                sceKernelUnlockMutex(mutexid, 0);
-                return false;
+            sceKernelLockMutex(mutexid, 1, NULL);
+            while (m_queue.empty() && !m_forceExit.load())
+            {
+                sceKernelWaitCond(m_cv, NULL);
             }
-            popped_value = m_queue.front();
-            m_queue.pop();
-            sceKernelUnlockMutex(mutexid, 0);
-            return true;
+            bool ok = !m_forceExit.load() && !m_queue.empty();
+            if (ok)
+            {
+                popped_value = m_queue.front();
+                m_queue.pop();
+            }
+            sceKernelUnlockMutex(mutexid, 1);
+            return ok;
         }
-        /// <summary> Timed wait and pop an element in the queue. </summary>
-        /// <param name="popped_value"> [in,out] Element. </param>
-        /// <param name="milliseconds"> [in] Wait time. </param>
-        ///  <returns> False for timeout or forced exit. </returns>
+
+        /// Waits up to `milliseconds` for an element. Returns false on timeout
+        /// or forced exit.
         bool wtpop(dataType &popped_value, long milliseconds = 1000)
         {
-            sceKernelLockMutex(mutexid, 0, 0);
-            // m_cv.wait_for(lk, std::chrono::milliseconds(milliseconds), [&]() -> bool
-                        //   { return !m_queue.empty() || m_forceExit.load(); });
-            uint32_t us = milliseconds * 1000;
-            sceKernelWaitCond(m_cv, &us);
-            if (m_forceExit.load()) {
-                sceKernelUnlockMutex(mutexid, 0);
-                return false;
+            sceKernelLockMutex(mutexid, 1, NULL);
+            if (m_queue.empty() && !m_forceExit.load())
+            {
+                SceUInt32 us = milliseconds * 1000;
+                sceKernelWaitCond(m_cv, &us);
             }
-            if (m_queue.empty()) {
-                sceKernelUnlockMutex(mutexid, 0);
-                return false;
+            bool ok = !m_forceExit.load() && !m_queue.empty();
+            if (ok)
+            {
+                popped_value = m_queue.front();
+                m_queue.pop();
             }
-            popped_value = m_queue.front();
-            m_queue.pop();
-            sceKernelUnlockMutex(mutexid, 0);
-            return true;
+            sceKernelUnlockMutex(mutexid, 1);
+            return ok;
         }
-        /// <summary> Queue size. </summary>
+
         int size()
         {
-            sceKernelLockMutex(mutexid, 0, 0);
+            sceKernelLockMutex(mutexid, 1, NULL);
             auto tmp = static_cast<int>(m_queue.size());
-            sceKernelUnlockMutex(mutexid, 0);
+            sceKernelUnlockMutex(mutexid, 1);
             return tmp;
         }
-        /// <summary> Free the queue and force stop. </summary>
+
+        /// Empties the queue and releases every waiter.
         void clear()
         {
             m_forceExit.store(true);
-            sceKernelLockMutex(mutexid, 0, 0);
+            sceKernelLockMutex(mutexid, 1, NULL);
             while (!m_queue.empty())
             {
-                //delete m_queue.front();
                 m_queue.pop();
             }
-            sceKernelUnlockMutex(mutexid, 0);
-            sceKernelSignalCond(m_cv);
+            sceKernelSignalCondAll(m_cv);
+            sceKernelUnlockMutex(mutexid, 1);
         }
-        /// <summary> Check queue in forced exit state. </summary>
+
         bool isExit() const
         {
             return m_forceExit.load();

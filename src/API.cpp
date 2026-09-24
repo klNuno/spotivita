@@ -196,37 +196,18 @@ ApiResult API::get_playlist_tracks_web(const std::string &playlistId) {
     return web("GET", url);
 }
 
+// Search through the web player's GraphQL endpoint (pathfinder): the public
+// /v1/search answers 429 to this client_id. The persisted-query hash comes
+// from the web player bundle (xpui-routes-search chunk); Spotify can rotate
+// it, and then search fails until SEARCH_TRACKS_HASH is refreshed.
 ApiResult API::search(const std::string &query, uint16_t limit) {
-    std::string url = SPOTIFY_API_BASE "/search?q=" + urlencode(query) +
-                      "&type=track&limit=" + std::to_string(limit);
-    return web("GET", url);
-}
-
-ApiResult API::play_context(const std::string &contextUri, uint32_t offset) {
-    std::string body = "{\"context_uri\":" + jsonString(contextUri) +
-                       ",\"offset\":{\"position\":" + std::to_string(offset) +
-                       "},\"position_ms\":0}";
-    return web("PUT", SPOTIFY_API_BASE "/me/player/play?device_id=" DEVICE_ID, body);
-}
-
-ApiResult API::play_track(const std::string &trackUri) {
-    std::string body = "{\"uris\":[" + jsonString(trackUri) + "]}";
-    return web("PUT", SPOTIFY_API_BASE "/me/player/play?device_id=" DEVICE_ID, body);
-}
-
-// Spotify routes a SPIRC seek frame back to this Vita's cspot, which already
-// handles it -- so no new cspot code is needed.
-ApiResult API::seek(uint32_t positionMs) {
-    return web("PUT", SPOTIFY_API_BASE "/me/player/seek?position_ms=" +
-                      std::to_string(positionMs) + "&device_id=" DEVICE_ID);
-}
-
-ApiResult API::set_shuffle(bool on) {
-    return web("PUT", std::string(SPOTIFY_API_BASE "/me/player/shuffle?state=") +
-                      (on ? "true" : "false") + "&device_id=" DEVICE_ID);
-}
-
-ApiResult API::set_repeat(const char *mode) {
-    return web("PUT", std::string(SPOTIFY_API_BASE "/me/player/repeat?state=") + mode +
-                      "&device_id=" DEVICE_ID);
+    std::string body =
+        "{\"variables\":{\"searchTerm\":" + jsonString(query) +
+        ",\"offset\":0,\"limit\":" + std::to_string(limit) +
+        ",\"numberOfTopResults\":5,\"includeAudiobooks\":false,\"includePreReleases\":false"
+        ",\"includeAlbumPreReleases\":false,\"includeAuthors\":false"
+        ",\"includeEpisodeContentRatingsV2\":false},"
+        "\"operationName\":\"searchTracks\","
+        "\"extensions\":{\"persistedQuery\":{\"version\":1,\"sha256Hash\":\"" SEARCH_TRACKS_HASH "\"}}}";
+    return web("POST", PATHFINDER_URL, body);
 }

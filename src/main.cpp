@@ -18,6 +18,7 @@
 #include <mutex>  // NOLINT
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "Paf.h"
 #include <SpircController.h>
@@ -225,6 +226,21 @@ int start_cspot(SceSize _args, void *_argp) {
         };
         gui->volumeCallback = [](int v) {
             queue_cspot([v] { spircController->setVolume(v); });
+        };
+        gui->playTracksCallback = [](const std::vector<std::string> &uris,
+                                     const std::string &context, uint32_t index) {
+            queue_cspot([uris, context, index] {
+                spircController->playTracks(uris, context, index);
+            });
+        };
+        gui->seekCallback = [](int ms) {
+            queue_cspot([ms] { spircController->seek(static_cast<uint32_t>(ms)); });
+        };
+        gui->shuffleCallback = [](bool on) {
+            queue_cspot([on] { spircController->setShuffle(on); });
+        };
+        gui->repeatCallback = [](int mode) {
+            queue_cspot([mode] { spircController->setRepeat(mode); });
         };
 
         mercuryManager->reconnectedCallback = []() {

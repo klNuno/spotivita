@@ -42,7 +42,10 @@ endforeach()
 # The cspot submodule is pinned at an old commit; these overrides are applied
 # in-place at configure time so the checkout itself stays otherwise clean.
 
-# Full-file Vita replacements copied over the submodule.
+# Full-file Vita replacements copied over the submodule. The copies happen at
+# configure time, so an edit under patch/ must re-run configure.
+file(GLOB_RECURSE _patch_files ${CMAKE_CURRENT_SOURCE_DIR}/patch/*)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_patch_files})
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/Queue.h
      DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/bell/include)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/ZeroconfAuthenticator.cpp
@@ -80,6 +83,13 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/ShannonConnection.cpp
 # _kill_r/__verbose_terminate_handler crash). The patch broadens the catch and
 # guards reconnectedCallback so a reconnect never crashes the process.
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/MercuryManager.cpp
+     DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/src)
+# Local playback (playTracks, seek, shuffle, repeat): the Web API player
+# endpoints answer 429 to tokens minted for this client, so the Vita builds its
+# own queue instead of asking Spotify's servers to start playback.
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/SpircController.h
+     DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/include)
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/SpircController.cpp
      DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/src)
 
 # Surgical edit to the pinned cspot CMakeLists (bell is replaced wholesale above).

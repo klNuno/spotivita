@@ -14,7 +14,7 @@ struct TrackRow {
     std::string name;     // "" until metadata arrives
     std::string artist;
     std::string uri;      // spotify:track:<id>
-    uint32_t position;    // index inside the playlist, for play_context offsets
+    uint32_t position;    // index inside the playlist, the start of a local queue
 };
 
 struct Playlist {

@@ -19,9 +19,13 @@
 // spclient is the internal path the official apps use; the SAME session token
 // works there and is NOT subject to that shared public quota. Verified live:
 // spclient rootlist -> 200 while api.spotify.com/v1 -> 429 with the same token.
-// Browsing therefore goes through spclient; the Web API is kept only for what
-// spclient has no simple equivalent for (player commands, search).
+// Browsing therefore goes through spclient, playback through cspot itself,
+// search through the web player's GraphQL endpoint.
 #define SPCLIENT_BASE                      "https://spclient.wg.spotify.com"
+
+// Web player GraphQL. searchTracks hash taken from the web player on 2026-09-25.
+#define PATHFINDER_URL                     "https://api-partner.spotify.com/pathfinder/v2/query"
+#define SEARCH_TRACKS_HASH                 "b02683192a98dde7966b5e6655a79eeb62713eab703eda9902c932818dd52751"
 
 // status: HTTP status, or 0 when the transfer failed (DNS, TLS, timeout).
 // body: raw response (protobuf for spclient, JSON for the Web API).
@@ -50,14 +54,11 @@ class API {
     ApiResult get_playlist(const std::string &playlistId);
     ApiResult get_track_metadata(const std::string &trackId);
 
-    // Web API, JSON.
+    // Web API, JSON. Last-resort fallback for track titles; usually 429.
     ApiResult get_playlist_tracks_web(const std::string &playlistId);
+
+    // pathfinder GraphQL searchTracks, JSON.
     ApiResult search(const std::string &query, uint16_t limit);
-    ApiResult play_context(const std::string &contextUri, uint32_t offset);
-    ApiResult play_track(const std::string &trackUri);
-    ApiResult seek(uint32_t positionMs);
-    ApiResult set_shuffle(bool on);
-    ApiResult set_repeat(const char *mode);  // "off" | "context" | "track"
 
  private:
     std::string bearer(bool forceRefresh);

@@ -60,3 +60,9 @@ pwsh -File tools/vita3k/vita3k.ps1 stop
 ```
 
 Without a Spotify login (Zeroconf needs a phone on the LAN), `ui screen playback` shows the player UI so layout and navigation can still be checked.
+
+## Logging in without a phone
+
+`python tools/vita3k/login.py` writes `ux0:data/cspot/authBlob.json` in the emulator, so the app boots logged in and every network flow (library, search, playback) runs in Vita3K. It prints a Spotify authorize URL; log in from a browser on the same PC and the redirect to `127.0.0.1:5588` comes back on its own. From another device, paste the dead `127.0.0.1` address into `tools/vita3k/redirect.txt` instead. The code is traded for a token, librespot (`cargo install librespot`, or `LIBRESPOT=<path>`) turns it into reusable stored credentials, and the script converts them to the app's format. It prints no secret. The same file copied to `ux0:data/cspot/` on a console skips Zeroconf there too.
+
+Audio goes to SDL's dummy driver, so playback is silent; `state` shows the position moving.

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 #include "API.h"
 #include "NetWorker.h"
 #include "PlayerModel.h"
@@ -51,6 +52,12 @@ class GUI {
     std::function<void()> prevCallback = []() {};
     std::function<void()> playToggleCallback = []() {};
     std::function<void(int)> volumeCallback = [](int) {};  // 0..65535
+    // Local playback: track URIs, context URI, start index.
+    std::function<void(const std::vector<std::string>&, const std::string&, uint32_t)>
+        playTracksCallback = [](const std::vector<std::string>&, const std::string&, uint32_t) {};
+    std::function<void(int)> seekCallback = [](int) {};       // ms
+    std::function<void(bool)> shuffleCallback = [](bool) {};
+    std::function<void(int)> repeatCallback = [](int) {};    // 0 off, 1 all, 2 one
 
     // Short message at the bottom of the screen (GUI thread only).
     void toast(const std::string &msg);

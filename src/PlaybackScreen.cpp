@@ -53,10 +53,11 @@ const char *stateName(LoadState s) {
 
 std::string describeStatus(long status) {
     switch (status) {
+        case -1:  return "Spotify changed its search API. Update psvitify.";
         case 0:   return "No connection to Spotify. Check the Wi-Fi.";
         case 401: return "Spotify session expired. Restart the app.";
         case 403: return "Spotify refused this action (Premium required).";
-        case 404: return "Spotify does not see psvitify as active yet. Start playback once from your phone.";
+        case 404: return "Spotify could not find this item.";
         case 429: return "Spotify is rate limiting this app. Try again in a minute.";
         default:  return "Spotify error " + std::to_string(status) + ".";
     }
@@ -677,21 +678,37 @@ void PlaybackScreen::startSearch(const std::string &query) {
     gui->net.post([this, g, query] {
         ApiResult r = g->api.search(query, 20);
         std::vector<SearchTrack> found;
+        long status = r.status;
         if (r.ok()) {
+            // pathfinder searchTracks: data.searchV2.tracksV2.items[].item.data
+            // { uri, name, artists.items[].profile.name }
             cJSON *root = cJSON_Parse(r.body.c_str());
-            cJSON *tracks = root ? cJSON_GetObjectItem(root, "tracks") : NULL;
-            cJSON *items = tracks ? cJSON_GetObjectItem(tracks, "items") : NULL;
+            cJSON *data = root ? cJSON_GetObjectItem(root, "data") : NULL;
+            cJSON *sv2 = data ? cJSON_GetObjectItem(data, "searchV2") : NULL;
+            cJSON *tv2 = sv2 ? cJSON_GetObjectItem(sv2, "tracksV2") : NULL;
+            cJSON *items = tv2 ? cJSON_GetObjectItem(tv2, "items") : NULL;
+            if (!cJSON_IsArray(items)) status = -1;  // GraphQL errors come back as 200
             int n = cJSON_IsArray(items) ? cJSON_GetArraySize(items) : 0;
             for (int i = 0; i < n; i++) {
-                cJSON *it = cJSON_GetArrayItem(items, i);
-                std::string name = jsonStr(it, "name"), uri = jsonStr(it, "uri");
+                cJSON *item = cJSON_GetObjectItem(cJSON_GetArrayItem(items, i), "item");
+                cJSON *t = item ? cJSON_GetObjectItem(item, "data") : NULL;
+                std::string name = jsonStr(t, "name"), uri = jsonStr(t, "uri");
                 if (name.empty() || uri.empty()) continue;
-                std::string artists = jsonArtists(it);
+                std::string artists;
+                cJSON *ar = cJSON_GetObjectItem(t, "artists");
+                cJSON *arItems = ar ? cJSON_GetObjectItem(ar, "items") : NULL;
+                int na = cJSON_IsArray(arItems) ? cJSON_GetArraySize(arItems) : 0;
+                for (int k = 0; k < na && k < 3; k++) {
+                    cJSON *profile = cJSON_GetObjectItem(cJSON_GetArrayItem(arItems, k), "profile");
+                    std::string a = jsonStr(profile, "name");
+                    if (a.empty()) continue;
+                    if (!artists.empty()) artists += ", ";
+                    artists += a;
+                }
                 found.push_back({artists.empty() ? name : name + "\n" + artists, uri});
             }
             cJSON_Delete(root);
         }
-        long status = r.status;
         g->net.deliver([this, query, found, status] {
             if (query != searchQuery) return;   // a newer search replaced this one
             searchResults = found;
@@ -706,52 +723,46 @@ void PlaybackScreen::reportPlayerError(long status) {
     gui->toast(describeStatus(status));
 }
 
+// Playback runs locally through cspot: the Web API player endpoints answer 429
+// to tokens minted for this client, whatever the request rate.
 void PlaybackScreen::playContext(const std::string &uri, uint32_t offset) {
-    GUI *g = gui;
-    gui->net.post([this, g, uri, offset] {
-        long status = g->api.play_context(uri, offset).status;
-        g->net.deliver([this, status] { reportPlayerError(status); });
-    }, true);
+    int i = findPlaylist(playlists, uri);
+    if (i < 0) return;
+    std::vector<std::string> uris;
+    uint32_t index = 0;
+    for (const TrackRow &row : playlists[i].tracks) {
+        if (row.position == offset) index = uris.size();
+        uris.push_back(row.uri);
+    }
+    if (uris.empty()) {
+        gui->toast("Tracks are still loading");
+        return;
+    }
+    gui->playTracksCallback(uris, uri, index);
 }
 
 void PlaybackScreen::playTrack(const std::string &uri) {
-    GUI *g = gui;
-    gui->net.post([this, g, uri] {
-        long status = g->api.play_track(uri).status;
-        g->net.deliver([this, status] { reportPlayerError(status); });
-    }, true);
+    // Queue the whole result list so next/prev keep working.
+    std::vector<std::string> uris;
+    uint32_t index = 0;
+    for (const SearchTrack &t : searchResults) {
+        if (t.uri == uri) index = uris.size();
+        uris.push_back(t.uri);
+    }
+    if (uris.empty()) uris.push_back(uri);
+    gui->playTracksCallback(uris, "", index);
 }
 
 void PlaybackScreen::sendSeek(int ms) {
-    GUI *g = gui;
-    gui->net.post([this, g, ms] {
-        long status = g->api.seek(static_cast<uint32_t>(ms)).status;
-        g->net.deliver([this, status] { reportPlayerError(status); });
-    }, true);
+    gui->seekCallback(ms);
 }
 
 void PlaybackScreen::sendShuffle(bool on) {
-    GUI *g = gui;
-    gui->net.post([this, g, on] {
-        long status = g->api.set_shuffle(on).status;
-        g->net.deliver([this, status, on] {
-            if (status < 200 || status >= 300) shuffleOn = !on;   // undo the optimistic flip
-            reportPlayerError(status);
-        });
-    }, true);
+    gui->shuffleCallback(on);
 }
 
 void PlaybackScreen::sendRepeat(int mode) {
-    static const char* kModes[] = { "off", "context", "track" };
-    GUI *g = gui;
-    int previous = repeatMode;
-    gui->net.post([this, g, mode, previous] {
-        long status = g->api.set_repeat(kModes[mode]).status;
-        g->net.deliver([this, status, previous] {
-            if (status < 200 || status >= 300) repeatMode = previous;
-            reportPlayerError(status);
-        });
-    }, true);
+    gui->repeatCallback(mode);
 }
 
 // ---------------------------------------------------------------- drawing
