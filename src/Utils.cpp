@@ -5,6 +5,7 @@
 #include <psp2/io/stat.h>
 #include <psp2/io/fcntl.h>
 #include <pthread.h>
+#include <arpa/inet.h>
 #include <cstring>
 #include <string>
 #include <Logger.h>
@@ -89,6 +90,25 @@ bool cache_cover_art(std::string url, const uint8_t *buffer, uint32_t length) {
     return true;
 }
 
+// When inet_pton says the host is an IP literal, curl matches the certificate
+// against IP entries instead of the DNS name. Vita3K's inet_pton answers
+// nonzero for host names, so every HTTPS call failed there with "no
+// alternative certificate subject name matches target ipv4 address". A real
+// Vita answers 0 and keeps the full check; only a broken inet_pton turns the
+// name check off, and the chain is still verified against the CA bundle.
+static long verify_host_level() {
+    static long level = -1;
+    if (level < 0) {
+        struct in_addr a;
+        int r = inet_pton(AF_INET, "spotify.com", &a);
+        level = (r == 0) ? 2L : 0L;
+        if (level == 0) {
+            CSPOT_LOG(info, "inet_pton(host name) returned %d: TLS name check off", r);
+        }
+    }
+    return level;
+}
+
 int download(const char *url, uint8_t **return_buffer, const char *method, std::string post_data, Headers headers,
              long *status) {
     CURL *curl_handle;
@@ -107,7 +127,7 @@ int download(const char *url, uint8_t **return_buffer, const char *method, std::
     // (VERIFYHOST/PEER 0), which let anyone on the network MITM the Spotify Web
     // API traffic -- and that traffic carries the bearer token. Needs a correct
     // system clock on the Vita.
-    curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST, verify_host_level());
     curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl_handle, CURLOPT_CAINFO, TLS_CA_BUNDLE);
     curl_easy_setopt(curl_handle, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
@@ -116,6 +136,8 @@ int download(const char *url, uint8_t **return_buffer, const char *method, std::
     curl_easy_setopt(curl_handle, CURLOPT_CONNECTTIMEOUT, 8L);
     curl_easy_setopt(curl_handle, CURLOPT_TIMEOUT, 12L);
     curl_easy_setopt(curl_handle, CURLOPT_CUSTOMREQUEST, method);
+    char errbuf[CURL_ERROR_SIZE] = {0};
+    curl_easy_setopt(curl_handle, CURLOPT_ERRORBUFFER, errbuf);
 
     if (post_data.size() != 0) {
         curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, post_data.c_str());
@@ -145,12 +167,12 @@ int download(const char *url, uint8_t **return_buffer, const char *method, std::
     }
 
     if (res != CURLE_OK) {
-        CSPOT_LOG(error, "curl_easy_perform() failed: %s", curl_easy_strerror(res));
+        CSPOT_LOG(error, "curl_easy_perform() failed: %s (%s)", curl_easy_strerror(res), errbuf);
         free(chunk.memory);
         *return_buffer = NULL;
         chunk.size = 0;
     } else {
-        CSPOT_LOG(debug, "%zu bytes retrieved", chunk.size);
+        CSPOT_LOG(debug, "%lu bytes retrieved", (unsigned long) chunk.size);
         *return_buffer = (uint8_t *) chunk.memory;
     }
     curl_easy_cleanup(curl_handle);
@@ -191,13 +213,15 @@ int spclient_get(const char *url, const std::string &bearer, uint8_t **return_bu
     curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
     curl_easy_setopt(h, CURLOPT_WRITEDATA, (void *)&chunk);
     curl_easy_setopt(h, CURLOPT_USERAGENT, USER_AGENT);
-    curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, verify_host_level());
     curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(h, CURLOPT_CAINFO, TLS_CA_BUNDLE);
     curl_easy_setopt(h, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
     curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT, 8L);
     curl_easy_setopt(h, CURLOPT_TIMEOUT, 12L);
     curl_easy_setopt(h, CURLOPT_TCP_KEEPALIVE, 1L);
+    char errbuf[CURL_ERROR_SIZE] = {0};
+    curl_easy_setopt(h, CURLOPT_ERRORBUFFER, errbuf);
 
     struct curl_slist *hl = NULL;
     std::string auth = "Authorization: Bearer " + bearer;
@@ -212,7 +236,7 @@ int spclient_get(const char *url, const std::string &bearer, uint8_t **return_bu
     curl_slist_free_all(hl);
 
     if (res != CURLE_OK) {
-        CSPOT_LOG(error, "spclient_get failed: %s", curl_easy_strerror(res));
+        CSPOT_LOG(error, "spclient_get failed: %s (%s)", curl_easy_strerror(res), errbuf);
         free(chunk.memory);
         *return_buffer = NULL;
         return 0;
