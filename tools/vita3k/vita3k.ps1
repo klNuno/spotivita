@@ -55,6 +55,7 @@ param(
     [ValidateSet('Vulkan', 'OpenGL')] [string]$Renderer = 'Vulkan',
     [string]$Root = $(if ($env:VITA3K_ROOT) { $env:VITA3K_ROOT } else { '.vita3k' }),
     [int]$BootTimeout = 90,
+    [int]$LogLimitMB = 256,
     [switch]$Update,
     [switch]$PrintWindow
 )
@@ -293,7 +294,36 @@ function Start-Vita3K([string]$cliArgs, [string]$titleId) {
     @{ Pid = $vpid; Desktop = $DesktopName; TitleId = $titleId; Started = (Get-Date).ToString('o'); Args = $cliArgs } |
         ConvertTo-Json | Set-Content $StateFile -Encoding utf8NoBOM
     Write-Step "started pid $vpid on desktop '$DesktopName' ($cliArgs)"
+    Start-LogGuard $vpid
     return [pscustomobject]@{ Pid = $vpid; Desk = $desk }
+}
+
+# A guest stuck in a faulting loop makes Vita3K log the same exception forever
+# (30 GB in three minutes, seen with a NULL ldrex). A detached watcher on the
+# hidden desktop kills the emulator past $LogLimitMB and trims the log to that
+# size, which keeps the first faults, the ones worth reading.
+function Start-LogGuard([int]$vpid) {
+    $limit = [int64]$LogLimitMB * 1MB
+    $marker = Join-Path $RunDir 'log-overflow.txt'
+    Remove-Item $marker -ErrorAction SilentlyContinue
+    $script = @"
+`$p = Get-Process -Id $vpid -ErrorAction SilentlyContinue
+while (`$p -and -not `$p.HasExited) {
+    `$l = Get-Item -LiteralPath '$LogFile' -ErrorAction SilentlyContinue
+    if (`$l -and `$l.Length -gt $limit) {
+        Stop-Process -Id $vpid -Force -ErrorAction SilentlyContinue
+        `$p.WaitForExit(10000) | Out-Null
+        `$fs = [IO.File]::Open('$LogFile', 'Open', 'ReadWrite', 'ReadWrite')
+        try { `$fs.SetLength($limit) } finally { `$fs.Close() }
+        Set-Content -LiteralPath '$marker' -Value "killed pid $vpid at `$(Get-Date -Format o): log over $LogLimitMB MB"
+        break
+    }
+    Start-Sleep -Seconds 2
+}
+"@
+    $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+    $pwsh = (Get-Process -Id $PID).Path
+    [Vita3KHarness.Native]::Launch($pwsh, "-NoProfile -NonInteractive -EncodedCommand $enc", $RunDir, $DesktopName, [uint64]$Affinity) | Out-Null
 }
 
 function Wait-Until([scriptblock]$cond, [int]$timeoutSec, [string]$what, [int]$procId = 0) {

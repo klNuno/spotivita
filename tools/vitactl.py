@@ -8,13 +8,15 @@ ux0:data/cspot/loopback present). One command per call, or several with ';':
   vitactl.py tap 700 200
   vitactl.py swipe 700 450 700 150 [frames]
   vitactl.py press start          (cross circle square triangle up down left right l r start select, '+' joins)
-  vitactl.py ui search daft punk  (screen hook: tab NAME, search Q, open N, back, refresh, toast TEXT)
-  vitactl.py shot out.png         (BMP from the device, converted to PNG when Pillow is present)
+  vitactl.py ui search daft punk  (tab NAME, search Q, open N, back, refresh, toast TEXT, screen login|playback)
+  vitactl.py shot out.png         (BMP from the device, converted to PNG when Pillow is present;
+                                   under Vita3K the guest framebuffer stays black: use vita3k.ps1 shot)
   vitactl.py log [bytes]
   vitactl.py get ux0:data/cspot/log.txt local.txt
   vitactl.py put local_eboot.bin ux0:app/PSVITIFY1/eboot.bin
   vitactl.py deploy build/dev/eboot.bin   (put eboot + relaunch, then wait for the app to answer)
   vitactl.py wait [seconds]       (poll until the app answers ping)
+  vitactl.py find [a.b.c]         (scan a.b.c.1-254, default this PC's /24, for a devkit build)
 """
 import argparse
 import json
@@ -22,6 +24,7 @@ import os
 import socket
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 PORT = 2138
 TITLE_ID = "PSVITIFY1"
@@ -91,8 +94,38 @@ def wait_ready(host, seconds):
     return False
 
 
+def local_prefix():
+    # Connecting a UDP socket sends nothing; it only picks the outgoing interface.
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("192.0.2.1", 9))
+        return s.getsockname()[0].rsplit(".", 1)[0]
+    finally:
+        s.close()
+
+
+def answers(host):
+    try:
+        return Link(host, timeout=0.4).text("ping") == "OK pong"
+    except OSError:
+        return False
+
+
+def find(prefix):
+    hosts = ["%s.%d" % (prefix, i) for i in range(1, 255)]
+    with ThreadPoolExecutor(max_workers=64) as pool:
+        found = [h for h, ok in zip(hosts, pool.map(answers, hosts)) if ok]
+    for h in found:
+        print("OK", h)
+    if not found:
+        print("ERR no devkit build answers on %s.0/24" % prefix)
+    return 0 if found else 1
+
+
 def run(host, argv):
     cmd = argv[0]
+    if cmd == "find":
+        return find(argv[1] if len(argv) > 1 else local_prefix())
     if cmd == "wait":
         ok = wait_ready(host, float(argv[1]) if len(argv) > 1 else 30)
         print("OK ready" if ok else "ERR no answer")

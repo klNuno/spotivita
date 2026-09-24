@@ -10,12 +10,11 @@ jobs:
         fail-fast: false
     runs-on:  ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v2
-      # with:
-        # submodules: recursive
-      
+    - uses: actions/checkout@v4
+
     - name: Install cpplint
-      run: sudo pip3 install cpplint
+      # ubuntu-24.04 refuses a system-wide pip install (PEP 668).
+      run: pipx install cpplint
 
     - name: Install cppcheck
       run: sudo apt -y install cppcheck
