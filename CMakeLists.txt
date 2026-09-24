@@ -18,7 +18,9 @@ project(cspot_vita C CXX)
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu11")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti -std=c++20")
+# GCC >= 13 stopped pulling <cstdint> in transitively; the pinned cspot/bell
+# sources rely on it, so force it instead of patching every submodule file.
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti -std=c++20 -include cstdint")
 set(CMAKE_CXX_STANDARD 20)
 
 # --- Patch the pinned cspot/bell submodule for the Vita toolchain ---------
@@ -89,6 +91,15 @@ add_subdirectory("cspot/cspot" ${CMAKE_CURRENT_BINARY_DIR}/cspot)
 
 find_package(CURL REQUIRED)
 find_package(OpenSSL REQUIRED)
+# vdpm's CURLTargets.cmake hardcodes /usr/local/vitasdk for libzstd, which breaks
+# any SDK installed elsewhere (e.g. the native Windows toolchain). Relocate it.
+if(TARGET CURL::libcurl_static)
+  get_target_property(_curl_deps CURL::libcurl_static INTERFACE_LINK_LIBRARIES)
+  if(_curl_deps)
+    string(REPLACE "/usr/local/vitasdk" "${VITASDK}" _curl_deps "${_curl_deps}")
+    set_target_properties(CURL::libcurl_static PROPERTIES INTERFACE_LINK_LIBRARIES "${_curl_deps}")
+  endif()
+endif()
 
 include_directories(
   ${CMAKE_SOURCE_DIR}/include
@@ -109,6 +120,7 @@ add_executable(${PROJECT_NAME}
   src/PlaybackScreen.cpp
   src/LoginScreen.cpp
   src/GuiUtils.cpp
+  src/Compat.c
 )
 
 target_link_libraries(${PROJECT_NAME}
