@@ -23,6 +23,14 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu11")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti -std=c++20 -include cstdint")
 set(CMAKE_CXX_STANDARD 20)
 
+# libstdc++ decides at runtime whether threads exist by checking a WEAK reference
+# to pthread_cancel (gthr-posix.h, non-glibc branch). In a static Vita link nothing
+# pulls pthread_cancel in, the weak ref resolves to 0, and every std::mutex /
+# std::lock_guard / std::condition_variable silently becomes a no-op (and
+# std::thread throws "Enable multithreading"). That broke the audio ring buffer,
+# PlayerModel and cspot's Mercury/Shannon locking. Force the symbol in.
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--undefined=pthread_cancel")
+
 # --- Patch the pinned cspot/bell submodule for the Vita toolchain ---------
 # The cspot submodule is pinned at an old commit; these overrides are applied
 # in-place at configure time so the checkout itself stays otherwise clean.
