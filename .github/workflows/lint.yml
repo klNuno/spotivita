@@ -31,12 +31,12 @@ jobs:
         submodules: recursive
 
     # The image is Ubuntu 24.04 with the whole vdpm catalogue (vita2d,
-    # imgui-vita2d, curl, openssl). nanopb only needs protoc and its Python
-    # bindings on the host.
+    # imgui-vita2d, curl, openssl). nanopb only needs protoc, its Python
+    # bindings and pkg_resources (setuptools) on the host.
     - name: Install build deps
       run: |
         apt-get update
-        apt-get install -y --no-install-recommends protobuf-compiler python3-protobuf
+        apt-get install -y --no-install-recommends protobuf-compiler python3-protobuf python3-setuptools
 
     - name: Build VPK
       run: |
