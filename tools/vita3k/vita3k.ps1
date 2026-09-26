@@ -22,7 +22,7 @@
     -Renderer Vulkan|OpenGL         Vita3K backend (default Vulkan).
     -PrintWindow                    shot: capture the window with PrintWindow
                                     instead of the native screenshot (diagnosis).
-    -Root <dir>                     Install root (default .vita3k,
+    -Root <dir>                     Install root (default .vita3k at the repo root,
                                     or $env:VITA3K_ROOT).
 
   How it works
@@ -53,7 +53,7 @@ param(
     [Parameter(Position = 2)] [string]$Arg2,
     [int]$Seconds = 5,
     [ValidateSet('Vulkan', 'OpenGL')] [string]$Renderer = 'Vulkan',
-    [string]$Root = $(if ($env:VITA3K_ROOT) { $env:VITA3K_ROOT } else { '.vita3k' }),
+    [string]$Root = $(if ($env:VITA3K_ROOT) { $env:VITA3K_ROOT } else { Join-Path (Split-Path (Split-Path $PSScriptRoot)) '.vita3k' }),
     [int]$BootTimeout = 90,
     [int]$LogLimitMB = 256,
     [switch]$Update,

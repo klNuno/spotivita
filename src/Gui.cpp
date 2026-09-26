@@ -251,7 +251,7 @@ void GUI::start() {
             Input::new_frame(!dialog);
             ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
             ImGui::SetNextWindowSize(ImVec2(960.0f, 544.0f), ImGuiCond_Always);
-            if (ImGui::Begin("psvitify", nullptr, WINDOW_FLAGS | ImGuiWindowFlags_NoScrollbar |
+            if (ImGui::Begin("Spotivita", nullptr, WINDOW_FLAGS | ImGuiWindowFlags_NoScrollbar |
                                                   ImGuiWindowFlags_NoScrollWithMouse |
                                                   ImGuiWindowFlags_NoBringToFrontOnFocus)) {
                 Screen *current = screen.load();

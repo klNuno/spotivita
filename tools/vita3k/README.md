@@ -6,16 +6,16 @@
 
 ```powershell
 pwsh -File tools/vita3k/vita3k.ps1 setup                      # once; safe to re-run
-pwsh -File tools/vita3k/vita3k.ps1 install build/cspot_vita.vpk
+pwsh -File tools/vita3k/vita3k.ps1 install build/spotivita.vpk
 pwsh -File tools/vita3k/vita3k.ps1 run VITA3KTST -Seconds 5
 pwsh -File tools/vita3k/vita3k.ps1 shot out/screen.png
 pwsh -File tools/vita3k/vita3k.ps1 stop
 
 # or all four steps in one call (always stops the emulator at the end)
-pwsh -File tools/vita3k/vita3k.ps1 smoke build/cspot_vita.vpk out/screen.png
+pwsh -File tools/vita3k/vita3k.ps1 smoke build/spotivita.vpk out/screen.png
 ```
 
-`status` prints the running instance and its windows. Options: `-Renderer Vulkan|OpenGL` (default Vulkan), `-Root <dir>` (default `.vita3k` or `$env:VITA3K_ROOT`), `-BootTimeout <s>`, `-LogLimitMB <n>` (default 256), `-Update` (setup re-downloads Vita3K), `-PrintWindow` (shot, diagnosis only).
+`status` prints the running instance and its windows. Options: `-Renderer Vulkan|OpenGL` (default Vulkan), `-Root <dir>` (default `.vita3k` at the repo root, or `$env:VITA3K_ROOT`), `-BootTimeout <s>`, `-LogLimitMB <n>` (default 256), `-Update` (setup re-downloads Vita3K), `-PrintWindow` (shot, diagnosis only).
 
 ## How it works
 
@@ -48,11 +48,11 @@ Vita3K's `sceNetAccept` writes the peer address unconditionally: `accept(fd, NUL
 
 ## Driving the app
 
-A devkit build (`cmake -DPSVITIFY_DEVKIT=ON`) serves port 2138; `tools/vitactl.py` talks to it:
+A devkit build (`cmake -DSPOTIVITA_DEVKIT=ON`) serves port 2138; `tools/vitactl.py` talks to it:
 
 ```powershell
-pwsh -File tools/vita3k/vita3k.ps1 install build/dev/cspot_vita.vpk
-pwsh -File tools/vita3k/vita3k.ps1 run PSVITIFY1 -Seconds 6
+pwsh -File tools/vita3k/vita3k.ps1 install build/dev/spotivita.vpk
+pwsh -File tools/vita3k/vita3k.ps1 run SPOTIVITA -Seconds 6
 python tools/vitactl.py wait 15
 python tools/vitactl.py "ui screen playback; tap 660 492; state"
 pwsh -File tools/vita3k/vita3k.ps1 shot out/search.png

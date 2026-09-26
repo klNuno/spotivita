@@ -1,4 +1,4 @@
-name: Linter
+name: CI
 
 on: [push, pull_request]
 
@@ -56,9 +56,9 @@ jobs:
     # A weak pthread symbol means std::mutex or std::condition_variable is a
     # no-op or jumps to 0 at runtime (see the --undefined loop in CMakeLists.txt).
     - name: No weak pthread symbols
-      run: "! arm-vita-eabi-nm build/cspot_vita | grep ' w pthread'"
+      run: "! arm-vita-eabi-nm build/spotivita | grep ' w pthread'"
 
     - uses: actions/upload-artifact@v4
       with:
-        name: psvitify-vpk
-        path: build/cspot_vita.vpk
+        name: spotivita-vpk
+        path: build/spotivita.vpk

@@ -3,7 +3,7 @@
 class GUI;
 
 // Remote-control server for testing without touching the console (port 2138,
-// plain TCP, one text command per line). Built only with -DPSVITIFY_DEVKIT=ON:
+// plain TCP, one text command per line). Built only with -DSPOTIVITA_DEVKIT=ON:
 // it can read and write files, so it never ships in a release VPK.
 //
 //   ping                      -> OK pong

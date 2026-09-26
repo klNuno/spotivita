@@ -1,9 +1,8 @@
 cmake_minimum_required(VERSION 3.10)
 
-set(VITA_APP_NAME "psvitify")
-# New TITLEID so psvitify installs ALONGSIDE the old CSpot (CSPOT0021), not over it.
-set(VITA_TITLEID  "PSVITIFY1")
-set(VITA_BG_TITLEID  "PSVITIFY")
+set(VITA_APP_NAME "Spotivita")
+# Own TITLEID so Spotivita installs alongside the old CSpot (CSPOT0021), not over it.
+set(VITA_TITLEID  "SPOTIVITA")
 set(VITA_VERSION  "01.00")
 
 if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
@@ -14,7 +13,7 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
   endif()
 endif()
 
-project(cspot_vita C CXX)
+project(spotivita C CXX)
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=gnu11")
@@ -32,7 +31,7 @@ set(CMAKE_CXX_STANDARD 20)
 # The rest of gthr-posix.h is weak too: once threads count as active, nothing
 # pulled pthread_cond_* or pthread_once in either, so std::condition_variable
 # and std::call_once jumped to address 0 (found under Vita3K). Force them all;
-# check with `nm cspot_vita | grep " w pthread"`, only the stack hook may stay.
+# check with `nm spotivita | grep " w pthread"`, only the stack hook may stay.
 foreach(_sym pthread_cancel pthread_once pthread_cond_wait pthread_cond_timedwait
              pthread_cond_signal pthread_cond_broadcast pthread_cond_destroy)
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--undefined=${_sym}")
@@ -154,9 +153,9 @@ add_executable(${PROJECT_NAME}
 
 # Remote-control test server (see include/DevKit.h). It reads and writes files
 # over the LAN, so it is off unless a dev build asks for it.
-option(PSVITIFY_DEVKIT "Build the port 2138 debug server" OFF)
-if(PSVITIFY_DEVKIT)
-  target_compile_definitions(${PROJECT_NAME} PRIVATE PSVITIFY_DEVKIT)
+option(SPOTIVITA_DEVKIT "Build the port 2138 debug server" OFF)
+if(SPOTIVITA_DEVKIT)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE SPOTIVITA_DEVKIT)
 endif()
 
 target_link_libraries(${PROJECT_NAME}

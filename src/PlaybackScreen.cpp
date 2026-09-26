@@ -53,7 +53,7 @@ const char *stateName(LoadState s) {
 
 std::string describeStatus(long status) {
     switch (status) {
-        case -1:  return "Spotify changed its search API. Update psvitify.";
+        case -1:  return "Spotify changed its search API. Update Spotivita.";
         case 0:   return "No connection to Spotify. Check the Wi-Fi.";
         case 401: return "Spotify session expired. Restart the app.";
         case 403: return "Spotify refused this action (Premium required).";

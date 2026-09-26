@@ -1,6 +1,6 @@
 #pragma once
 
-#define DEVICE_NAME           "psvitify"
+#define DEVICE_NAME           "Spotivita"
 #define CREDENTIALS_FILE_NAME "ux0:data/cspot/authBlob.json"
 #define CONFIG_FILE_NAME      "ux0:data/cspot/config.json"
 

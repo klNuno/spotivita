@@ -17,7 +17,7 @@ void LoginScreen::draw() {
     ImGui::Dummy(ImVec2(0.0f, 4.0f));
 
     ImGui::PushFont(gui->font_bold);
-    TextCentered("psvitify");
+    TextCentered("Spotivita");
     ImGui::PopFont();
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
     TextCentered("Waiting for Spotify Connect");
@@ -28,7 +28,7 @@ void LoginScreen::draw() {
     TextCentered("1. Put your phone on the same Wi-Fi as the Vita");
     TextCentered("2. Open Spotify on your phone");
     TextCentered("3. Tap the Connect (devices) icon");
-    TextCentered("4. Pick \"psvitify\" in the device list");
+    TextCentered("4. Pick \"Spotivita\" in the device list");
     ImGui::PopStyleVar();
 
     ImGui::Dummy(ImVec2(0.0f, 10.0f));

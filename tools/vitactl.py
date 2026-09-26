@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive a psvitify devkit build (PSVITIFY_DEVKIT=ON) over TCP port 2138.
+"""Drive a Spotivita devkit build (SPOTIVITA_DEVKIT=ON) over TCP port 2138.
 
 Works against a real Vita on the LAN or Vita3K on this PC (127.0.0.1, with
 ux0:data/cspot/loopback present). One command per call, or several with ';':
@@ -13,13 +13,13 @@ ux0:data/cspot/loopback present). One command per call, or several with ';':
                                    under Vita3K the guest framebuffer stays black: use vita3k.ps1 shot)
   vitactl.py log [bytes]
   vitactl.py get ux0:data/cspot/log.txt local.txt
-  vitactl.py put local_eboot.bin ux0:app/PSVITIFY1/eboot.bin
+  vitactl.py put local_eboot.bin ux0:app/SPOTIVITA/eboot.bin
   vitactl.py deploy build/dev/eboot.bin   (put eboot + relaunch, then wait for the app to answer;
                                    when the app is down, FTP + relaunch through vitacompanion)
   vitactl.py wait [seconds]       (poll until the app answers ping)
   vitactl.py find [a.b.c]         (scan a.b.c.1-254, default this PC's /24, for a devkit build
                                    or vitacompanion)
-  vitactl.py vc launch PSVITIFY1  (raw vitacompanion command on port 1338: launch, quit, reboot,
+  vitactl.py vc launch SPOTIVITA  (raw vitacompanion command on port 1338: launch, quit, reboot,
                                    screen on|off, press, release; one per call, no ';')
 
 vitacompanion is installed once with tools/vitasetup.py.
@@ -37,7 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 PORT = 2138
 FTP_PORT = 1337
 VC_PORT = 1338
-TITLE_ID = "PSVITIFY1"
+TITLE_ID = "SPOTIVITA"
 
 
 class Link:

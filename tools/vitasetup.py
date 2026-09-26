@@ -3,14 +3,14 @@
 
 On the Vita: open VitaShell and press SELECT (FTP server on port 1337). Then:
 
-  python tools/vitasetup.py [--host IP] [--vpk build/dev/cspot_vita.vpk]
+  python tools/vitasetup.py [--host IP] [--vpk build/dev/spotivita.vpk]
 
 It finds the Vita on this PC's /24 (or VITA_HOST), then:
   1. copies vitacompanion 1.07 (user + kernel module, sha256-pinned) to ur0:tai/
      and adds both to the active taiHEN config.txt, after saving a copy of it
-     next to it as config.txt.psvitify-bak;
-  2. copies the dev VPK's files over ux0:app/PSVITIFY1/ when psvitify is
-     installed, or the VPK itself to ux0:data/psvitify/ for a VitaShell install.
+     next to it as config.txt.spotivita-bak;
+  2. copies the dev VPK's files over ux0:app/SPOTIVITA/ when Spotivita is
+     installed, or the VPK itself to ux0:data/spotivita/ for a VitaShell install.
 
 Reboot the Vita afterwards. From then on vitacompanion keeps the console awake,
 serves FTP on 1337 and takes launch/quit/reboot on 1338, so `vitactl deploy`
@@ -28,7 +28,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
 FTP_PORT = 1337
-TITLE_ID = "PSVITIFY1"
+TITLE_ID = "SPOTIVITA"
 VC_URL = "https://github.com/devnoname120/vitacompanion/releases/download/1.07/"
 VC_FILES = {
     "vitacompanion.suprx": "7ca14a00e853c26b836c78235e049d4386406e824284c22ce086b4b40e12c564",
@@ -153,19 +153,19 @@ def install_plugins(ftp):
     if patched == text:
         print("OK %s already loads vitacompanion" % path[1:].replace(":/", ":"))
         return
-    if read_file(ftp, path + ".psvitify-bak") is None:
-        write_file(ftp, path + ".psvitify-bak", raw)
+    if read_file(ftp, path + ".spotivita-bak") is None:
+        write_file(ftp, path + ".spotivita-bak", raw)
     write_file(ftp, path, patched.encode("utf-8"))
-    print("OK %s patched (copy in config.txt.psvitify-bak)" % path[1:].replace(":/", ":"))
+    print("OK %s patched (copy in config.txt.spotivita-bak)" % path[1:].replace(":/", ":"))
 
 
 def install_app(ftp, vpk):
     app = "/ux0:/app/" + TITLE_ID
     if not is_dir(ftp, app):
-        make_dirs(ftp, "/ux0:/data/psvitify")
+        make_dirs(ftp, "/ux0:/data/spotivita")
         with open(vpk, "rb") as f:
-            write_file(ftp, "/ux0:/data/psvitify/psvitify-dev.vpk", f.read())
-        print("OK ux0:data/psvitify/psvitify-dev.vpk: install it from VitaShell")
+            write_file(ftp, "/ux0:/data/spotivita/spotivita-dev.vpk", f.read())
+        print("OK ux0:data/spotivita/spotivita-dev.vpk: install it from VitaShell")
         return
     # sce_sys stays as installed: LiveArea data is cached by the system anyway.
     with zipfile.ZipFile(vpk) as z:
@@ -181,7 +181,7 @@ def install_app(ftp, vpk):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default=os.environ.get("VITA_HOST"))
-    ap.add_argument("--vpk", default="build/dev/cspot_vita.vpk")
+    ap.add_argument("--vpk", default="build/dev/spotivita.vpk")
     ap.add_argument("--no-plugins", action="store_true", help="skip vitacompanion")
     args = ap.parse_args()
     if not os.path.isfile(args.vpk):

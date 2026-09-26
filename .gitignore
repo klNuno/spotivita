@@ -1,4 +1,5 @@
 build
 bakup.cpp
 build-docker/
+.vita3k/
 tools/vita3k/redirect.txt

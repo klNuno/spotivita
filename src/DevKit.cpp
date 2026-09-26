@@ -14,7 +14,7 @@
 #include <utility>
 #include <vector>
 
-#ifdef PSVITIFY_DEVKIT
+#ifdef SPOTIVITA_DEVKIT
 
 #include <psp2/appmgr.h>
 #include <psp2/ctrl.h>

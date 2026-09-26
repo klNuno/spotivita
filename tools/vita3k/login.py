@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write a Spotify login into the Vita3K ux0 so psvitify starts logged in.
+"""Write a Spotify login into the Vita3K ux0 so Spotivita starts logged in.
 
 Zeroconf needs a phone on the same LAN as the Vita. This does the login on
 the PC instead:
@@ -11,7 +11,7 @@ the PC instead:
      script instead.
   2. Trades the code for an access token, hands it to librespot, which logs
      in to the AP and caches reusable stored credentials.
-  3. Converts librespot's credentials.json into psvitify's authBlob.json
+  3. Converts librespot's credentials.json into Spotivita's authBlob.json
      (authType 1, the type a Zeroconf login stores).
 
 No secret is printed. Needs librespot (cargo install librespot) and curl.
@@ -43,7 +43,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def default_out():
-    root = os.environ.get("VITA3K_ROOT", ".vita3k")
+    root = os.environ.get("VITA3K_ROOT") or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".vita3k")
     return os.path.join(root, "bin", "portable", "fs", "ux0", "data", "cspot", "authBlob.json")
 
 
@@ -56,7 +57,7 @@ def wait_for_code(url, state):
             got.update({k: v[0] for k, v in q.items()})
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(b"psvitify login received, you can close this tab")
+            self.wfile.write(b"Spotivita login received, you can close this tab")
 
         def log_message(self, *args):
             pass
@@ -95,11 +96,11 @@ def exchange(code, verifier):
 
 
 def stored_credentials(token, librespot):
-    cache = tempfile.mkdtemp(prefix="psvitify-login-")
+    cache = tempfile.mkdtemp(prefix="spotivita-login-")
     cred = os.path.join(cache, "credentials.json")
     env = dict(os.environ, LIBRESPOT_ACCESS_TOKEN=token)
     p = subprocess.Popen([librespot, "--cache", cache, "--disable-audio-cache", "--backend", "pipe",
-                          "--disable-discovery", "--name", "psvitify-login"],
+                          "--disable-discovery", "--name", "spotivita-login"],
                          env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(60):
