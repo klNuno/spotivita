@@ -25,6 +25,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <Logger.h>
 #include "Gui.h"
@@ -36,6 +37,9 @@ namespace DevKit {
 namespace {
 
 const int PORT = 2138;
+// Idle time before a silent client is dropped (a 3 MB eboot upload never
+// stalls this long between packets).
+const int CLIENT_TIMEOUT_S = 20;
 
 // A request that must run on the GUI thread; the server thread waits for it.
 struct GuiCall {
@@ -310,6 +314,14 @@ void *serverMain(void *) {
             sceKernelDelayThread(100000);
             continue;
         }
+        // One client at a time: a peer that vanished without closing (Wi-Fi
+        // asleep, PC gone) held the server in recv forever, and every later
+        // connection queued behind it and timed out.
+        struct timeval to;
+        to.tv_sec = CLIENT_TIMEOUT_S;
+        to.tv_usec = 0;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof(to));
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &to, sizeof(to));
         serve(fd);
         close(fd);
     }
