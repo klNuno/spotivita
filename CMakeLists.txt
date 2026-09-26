@@ -90,6 +90,18 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/SpircController.h
      DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/include)
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/SpircController.cpp
      DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/src)
+# Audio file choice: the configured bitrate, then any other Vorbis file, instead
+# of stalling silently when a track lacks the configured one.
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/SpotifyTrack.cpp
+     DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/src)
+# A reconnect fails every pending audio chunk. Upstream kept reading the failed
+# chunk in a busy loop (silence, controls starved); these re-request it, end an
+# unreadable stream like a finished track, and lock currentTrack, which the
+# player task deletes while the spirc thread pauses or cancels it.
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/ChunkedByteStream.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/patch/ChunkedAudioStream.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/patch/Player.cpp
+     DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/src)
 
 # Surgical edit to the pinned cspot CMakeLists (bell is replaced wholesale above).
 #  1) CMake >= 3.27 hard-errors on cmake_minimum_required < 3.5.
