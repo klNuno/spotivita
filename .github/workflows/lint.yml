@@ -30,10 +30,20 @@ jobs:
       with:
         submodules: recursive
 
+    # The image is Ubuntu 24.04 with the whole vdpm catalogue (vita2d,
+    # imgui-vita2d, curl, openssl). nanopb only needs protoc and its Python
+    # bindings on the host.
     - name: Install build deps
-      run: apk add --no-cache protobuf protobuf-dev cmake make git
+      run: |
+        apt-get update
+        apt-get install -y --no-install-recommends protobuf-compiler python3-protobuf
 
     - name: Build VPK
       run: |
         mkdir build && cd build
         cmake .. && make -j$(nproc)
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: psvitify-vpk
+        path: build/cspot_vita.vpk
