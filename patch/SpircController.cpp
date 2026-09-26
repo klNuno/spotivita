@@ -57,7 +57,7 @@ void SpircController::setPause(bool isPaused, bool notifyPlayer) {
 }
 
 void SpircController::disconnect(void) {
-    player->cancelCurrentTrack();
+    skipTo();
     state->setActive(false);
     notify();
     // Send the event at the end at it might be a last gasp
@@ -92,16 +92,24 @@ void SpircController::setRemoteVolume(int volume) {
     notify();
 }
 
+// A skip asked by a user (here or on another device): stop the current track and
+// its buffered audio now instead of letting them play while the next one loads.
+// The end of a track takes endOfFileCallback instead and stays gapless.
+void SpircController::skipTo() {
+    player->cancelCurrentTrack();
+    flushAudio();
+}
+
 void SpircController::nextSong() {
+    skipTo();
     if (state->nextTrack() || repeatQueue) {
         loadTrack();
-    } else {
-        player->cancelCurrentTrack();
     }
     notify();
 }
 
 void SpircController::prevSong() {
+    skipTo();
     state->prevTrack();
     loadTrack();
     notify();
@@ -126,6 +134,7 @@ void SpircController::handleFrame(std::vector<uint8_t> &data) {
         sendEvent(CSpotEventType::SEEK, (int) state->remoteFrame.position);
         state->updatePositionMs(state->remoteFrame.position);
         this->player->seekMs(state->remoteFrame.position);
+        flushAudio();
         notify();
         break;
     }
@@ -151,6 +160,7 @@ void SpircController::handleFrame(std::vector<uint8_t> &data) {
         CSPOT_LOG(debug, "Load frame!");
 
         state->setActive(true);
+        skipTo();
 
         // Every sane person on the planet would expect std::move to work here.
         // And it does... on every single platform EXCEPT for ESP32 for some
@@ -248,6 +258,7 @@ void SpircController::playTracks(const std::vector<std::string> &uris,
     rs.playing_track_index = start;
 
     state->setActive(true);
+    skipTo();
     state->updateTracks();
     state->updatePositionMs(0);
     loadTrack(0, false);
@@ -258,6 +269,7 @@ void SpircController::seek(uint32_t positionMs) {
     sendEvent(CSpotEventType::SEEK, (int) positionMs);
     state->updatePositionMs(positionMs);
     player->seekMs(positionMs);
+    flushAudio();
     notify();
 }
 

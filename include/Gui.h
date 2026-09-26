@@ -28,6 +28,7 @@ class GUI {
     ImFont *font_bold = nullptr;
     ImFont *playback_icon_font = nullptr;
     ImFont *icon_font = nullptr;
+    ImFont *small_icon_font = nullptr;   // 24 px: row art, volume
     ImFont *log_font = nullptr;
     Screen *login_screen = nullptr;
     Screen *playback_screen = nullptr;
@@ -58,6 +59,10 @@ class GUI {
     std::function<void(int)> seekCallback = [](int) {};       // ms
     std::function<void(bool)> shuffleCallback = [](bool) {};
     std::function<void(int)> repeatCallback = [](int) {};    // 0 off, 1 all, 2 one
+
+    // Audio quality in kb/s (96, 160 or 320), saved in the cspot config.
+    std::atomic<int> quality_kbps{320};
+    std::function<void(int)> qualityCallback = [](int) {};
 
     // Short message at the bottom of the screen (GUI thread only).
     void toast(const std::string &msg);

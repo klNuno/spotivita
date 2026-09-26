@@ -30,6 +30,10 @@ bool animating();
 // Buttons that went down this frame (SCE_CTRL_* mask), for global shortcuts.
 uint32_t pressed();
 
+// The system's cancel button (circle, or cross on Japanese consoles) went
+// down this frame.
+bool back_pressed();
+
 // Debug server, any thread. Queues frames of synthetic input.
 void inject_tap(int x, int y);
 void inject_swipe(int x1, int y1, int x2, int y2, int frames);

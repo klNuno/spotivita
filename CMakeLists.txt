@@ -216,6 +216,8 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} eboot.bin
   FILE common_data/PlusJakartaSans-Regular.ttf PlusJakartaSans-Regular.ttf
   FILE common_data/PlusJakartaSans-Medium.ttf PlusJakartaSans-Medium.ttf
   FILE common_data/PlusJakartaSans-Bold.ttf PlusJakartaSans-Bold.ttf
+  FILE common_data/Roboto-Regular.ttf Roboto-Regular.ttf
+  FILE common_data/Roboto-Bold.ttf Roboto-Bold.ttf
   FILE common_data/cacert.pem cacert.pem
   FILE common_data/cover_art.png cover_art.png
 )

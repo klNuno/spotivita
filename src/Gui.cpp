@@ -78,7 +78,7 @@ void applySpotifyTheme() {
     style.WindowPadding = ImVec2(16.0f, 16.0f);
     style.ItemSpacing = ImVec2(12.0f, 10.0f);
 
-    ImVec4 base  = ImVec4(0.07f, 0.07f, 0.07f, 1.00f);  // #121212
+    ImVec4 base  = ImVec4(0.0f, 0.0f, 0.0f, 1.00f);     // black: OLED pixels off
     ImVec4 elev  = ImVec4(0.09f, 0.09f, 0.09f, 1.00f);  // #181818
     ImVec4 card  = ImVec4(0.16f, 0.16f, 0.16f, 1.00f);  // #282828
     ImVec4 green = ImVec4(0.12f, 0.84f, 0.38f, 1.00f);  // #1ED760
@@ -121,8 +121,7 @@ void GUI::init() {
     font = AddDefaultFont(26);
     log_font = AddDefaultFont(14);
 
-    static const ImWchar latin[] = { 0x0020, 0x017F, 0 };
-    font_bold = io.Fonts->AddFontFromFileTTF("app0:PlusJakartaSans-Bold.ttf", 30.0f, NULL, latin);
+    font_bold = AddTextFont("app0:PlusJakartaSans-Bold.ttf", "app0:Roboto-Bold.ttf", 30.0f);
 
     static const ImWchar playback_ranges[] = { 0xf144, 0xf144, 0xf28b, 0xf28b, 0 };
     static const ImWchar ranges[] = {
@@ -139,6 +138,14 @@ void GUI::init() {
     };
     icon_font = io.Fonts->AddFontFromFileTTF(FONT_ICON_FILE_NAME_FAS, 40.0f, NULL, ranges);
     playback_icon_font = io.Fonts->AddFontFromFileTTF(FONT_ICON_FILE_NAME_FAS, 58.0f, NULL, playback_ranges);
+    static const ImWchar small_ranges[] = {
+        0xf001, 0xf001,  // music (playlist art)
+        0xf004, 0xf004,  // heart (Liked Songs)
+        0xf07b, 0xf07b,  // folder
+        0xf026, 0xf028,  // volume off/down/up
+        0,
+    };
+    small_icon_font = io.Fonts->AddFontFromFileTTF(FONT_ICON_FILE_NAME_FAS, 24.0f, NULL, small_ranges);
     io.Fonts->Build();
     Render::upload_fonts();
 

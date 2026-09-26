@@ -13,6 +13,8 @@
 
 // ImGui helper functions
 ImFont* AddDefaultFont(float pixel_size);
+// A text font with the Roboto fallback merged in (Greek, Cyrillic).
+ImFont* AddTextFont(const char *path, const char *fallbackPath, float pixel_size);
 bool StyleButton(const char* label, ImVec2 btn_size, bool active = false);
 void AlignForWidth(float width, float alignment = 0.5f);
 void TextCentered(const std::string& text);

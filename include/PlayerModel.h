@@ -43,6 +43,15 @@ class PlayerModel {
         anchorAtUs_ = nowUs();
     }
 
+    // Between LOAD and PLAYBACK_START: the clock holds still and the UI shows
+    // a spinner instead of a dead button.
+    void setLoading(bool loading) {
+        std::lock_guard<std::mutex> g(mutex_);
+        positionAnchorMs_ = interpLocked();
+        anchorAtUs_ = nowUs();
+        loading_ = loading;
+    }
+
     void setVolume(int volume0_65535) { volume_.store(volume0_65535); }
 
     struct Snapshot {
@@ -50,6 +59,7 @@ class PlayerModel {
         int durationMs = 0;
         int positionMs = 0;
         bool paused = true;
+        bool loading = false;
         int volume = 32767;
     };
 
@@ -63,6 +73,7 @@ class PlayerModel {
         s.durationMs = durationMs_;
         s.positionMs = interpLocked();
         s.paused = paused_;
+        s.loading = loading_;
         s.volume = volume_.load();
         return s;
     }
@@ -72,7 +83,7 @@ class PlayerModel {
 
     int interpLocked() {
         int pos = positionAnchorMs_;
-        if (!paused_) {
+        if (!paused_ && !loading_) {
             pos += static_cast<int>((nowUs() - anchorAtUs_) / 1000);
         }
         if (durationMs_ > 0 && pos > durationMs_) pos = durationMs_;
@@ -89,5 +100,6 @@ class PlayerModel {
     int positionAnchorMs_ = 0;
     uint64_t anchorAtUs_ = 0;
     bool paused_ = true;
+    bool loading_ = false;
     std::atomic<int> volume_{32767};
 };

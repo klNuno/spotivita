@@ -16,10 +16,18 @@ network layer.
 
 ## Features
 
-- Your playlists, and the tracks inside them.
+- Your library as Spotify shows it: Liked Songs first, then your playlists
+  and folders, in your order. It shows at once from a cache and refreshes in
+  the background at each launch.
 - Track search.
 - Play, pause, next, previous, seek on the progress bar, shuffle, repeat and
-  volume, all handled on the Vita.
+  volume, all handled on the Vita. Pause cuts the sound at once. Previous
+  restarts the track after its first 3 seconds, like Spotify.
+- Audio quality in Settings: Low (96 kb/s), Normal (160 kb/s) or Very high
+  (320 kb/s, the default).
+- Greek and Cyrillic titles. Emoji and CJK characters are left out, the fonts
+  on the Vita do not have them.
+- A black background, which turns the pixels off on the OLED model.
 - Spotify Connect: the Vita shows up in the device list of the Spotify app, so
   your phone can drive it too.
 - Background playback: press the PS button and the music keeps going, screen
@@ -29,10 +37,12 @@ network layer.
 ## Status
 
 Everything above runs in the Vita3K emulator, which has no sound, so playback
-there is checked by watching the position move. The build has not run on a
-real console since the renderer moved from vitaGL to vita2d. Background
-playback and the phone login were last checked on hardware before that change.
-If something breaks on your Vita, please open an issue.
+there is checked by watching the position move. The vita2d build plays,
+searches and runs in the background on a real PS Vita. A dropped connection
+to Spotify used to leave the player silent and deaf to pause; the stream now
+asks for the lost audio again after the reconnect. That fix has not been
+through a real disconnect yet. If something breaks on your Vita, please open
+an issue.
 
 ## Install
 
@@ -113,6 +123,9 @@ VITA_HOST=<vita-ip> python tools/vitactl.py "state; tap 660 492; shot s.png"
 - [feelfreelinux](https://github.com/feelfreelinux) and contributors for cspot
   and bell.
 - The vitasdk, vita2d, Dear ImGui and vitacompanion projects.
+- [Plus Jakarta Sans](https://github.com/tokotype/PlusJakartaSans) (OFL) and
+  [Roboto](https://github.com/googlefonts/roboto) (Apache License 2.0, see
+  `common_data/Roboto-LICENSE.txt`).
 
 ## Disclaimer
 

@@ -19,9 +19,24 @@ struct TrackRow {
 
 struct Playlist {
     std::string name;
-    std::string uri;      // spotify:playlist:<id>
+    std::string uri;      // spotify:playlist:<id>, or LIKED_SONGS_URI
+    int folder = -1;      // index into folders, -1 = library root
     std::vector<TrackRow> tracks;
     LoadState tracksState = LoadState::NONE;
+};
+
+// A folder of the Spotify library: the rootlist brackets its playlists with
+// spotify:start-group:<id>:<name> and spotify:end-group:<id>.
+struct Folder {
+    std::string id;
+    std::string name;
+    int parent = -1;      // -1 = library root
+};
+
+// One library row, in rootlist order.
+struct LibraryEntry {
+    bool isFolder;
+    int index;            // into folders or playlists
 };
 
 struct SearchTrack {
@@ -48,13 +63,24 @@ class PlaybackScreen: public Screen {
     enum class Tab { LIBRARY, SEARCH, LOG, SETTINGS };
 
     void drawNowPlaying(const PlayerModel::Snapshot& snap);
+    void drawTransport(const PlayerModel::Snapshot& snap);
     void drawBrowse(const PlayerModel::Snapshot& snap);
     void drawLibrary(const PlayerModel::Snapshot& snap, float avail);
     void drawPlaylist(const PlayerModel::Snapshot& snap, float avail);
     void drawSearch(float avail);
-    void drawLog();
+    void drawLog(float avail);
+    bool drawBackHeader(const std::string &title, float avail);
     void drawSettings(float avail);
     void drawNav();
+
+    // Previous restarts the track past its first seconds, like Spotify.
+    void previous(const PlayerModel::Snapshot& snap);
+    // Leaves the open playlist, then the open folder. False at the top.
+    bool goBack();
+
+    // Swaps in a fresh library, keeping loaded tracks and the open view.
+    void setLibrary(std::vector<Folder> f, std::vector<Playlist> p,
+                    std::vector<LibraryEntry> o);
 
     // Network actions (post jobs to the worker).
     void loadLibrary();
@@ -75,12 +101,16 @@ class PlaybackScreen: public Screen {
     vita2d_texture *cover_art_tex = nullptr;
     std::string coverUrl;          // url of the cover shown or being fetched
 
-    // Library
+    // Library. playlists[0] is always Liked Songs.
     std::vector<Playlist> playlists;
+    std::vector<Folder> folders;
+    std::vector<LibraryEntry> order;
     LoadState libraryState = LoadState::NONE;
     std::string libraryError;
+    bool libraryRefreshed = false;  // the cached library was refreshed this run
     int namesLeft = 0;             // names still being resolved (spinner)
-    int openIndex = -1;            // -1 = playlist list, else index into playlists
+    int openFolder = -1;           // folder shown by the library, -1 = root
+    int openIndex = -1;            // -1 = folder view, else index into playlists
     // Bumped to cancel an in-flight job: a job compares its captured value with
     // the live one before each request and before delivering.
     std::atomic<int> libraryGen{0};

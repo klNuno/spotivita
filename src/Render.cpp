@@ -105,7 +105,7 @@ bool createPrograms() {
 
 void init() {
     vita2d_init_advanced(POOL_SIZE);
-    vita2d_set_clear_color(RGBA8(0x12, 0x12, 0x12, 0xFF));
+    vita2d_set_clear_color(RGBA8(0, 0, 0, 0xFF));
     if (!createPrograms()) {
         CSPOT_LOG(error, "render: ImGui shader setup failed");
     }

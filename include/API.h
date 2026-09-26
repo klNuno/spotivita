@@ -9,7 +9,10 @@
 #define SPOTIFY_PLAYLIST_HEADER            "spotify:playlist:"
 #define SPOTIFY_TRACK_HEADER               "spotify:track:"
 #define SPOTIFY_ROOTLIST_LENGTH            200
-#define SPOTIFY_PLAYLIST_TRACK_LIMIT       100
+#define SPOTIFY_PLAYLIST_TRACK_LIMIT       500
+#define SPOTIFY_LIKED_PAGE                 100
+#define SPOTIFY_LIKED_LIMIT                500
+#define LIKED_SONGS_URI                    "spotify:collection:tracks"
 
 #define SPOTIFY_API_BASE                   "https://api.spotify.com/v1"
 
@@ -48,14 +51,14 @@ class API {
     void set_user(const std::string &user);
     void set_refresher(TokenRefresher refresher);
     bool has_token() const { return hasToken_.load(); }
+    std::string user() const;
 
     // spclient, protobuf (playlist4 SelectedListContent / metadata Track).
     ApiResult get_rootlist();
     ApiResult get_playlist(const std::string &playlistId);
     ApiResult get_track_metadata(const std::string &trackId);
-
-    // Web API, JSON. Last-resort fallback for track titles; usually 429.
-    ApiResult get_playlist_tracks_web(const std::string &playlistId);
+    // One page of Liked Songs (collection PageResponse protobuf), newest first.
+    ApiResult get_liked_page(const std::string &pageToken, int limit);
 
     // pathfinder GraphQL searchTracks, JSON.
     ApiResult search(const std::string &query, uint16_t limit);
@@ -63,7 +66,8 @@ class API {
  private:
     std::string bearer(bool forceRefresh);
     ApiResult web(const char *method, const std::string &url, const std::string &body = "");
-    ApiResult spclient(const std::string &url, const char *accept = nullptr);
+    ApiResult spclient(const std::string &url, const char *accept = nullptr,
+                       const std::string *body = nullptr, const char *contentType = nullptr);
 
     mutable std::mutex mutex_;
     std::string token_;

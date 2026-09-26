@@ -179,7 +179,11 @@ int start_cspot(SceSize _args, void *_argp) {
         // Feed the shared PlayerModel; the GUI thread observes it (no casts into
         // the screen, no direct cspot coupling). get_if avoids a throwing variant
         // access if an event ever carries an unexpected payload type.
-        spircController->setEventHandler([gui](CSpotEvent &event) {
+        // The sink ring holds about 1.5 s of PCM: stop it at once on pause and
+        // drop it on skip or seek, or the old audio keeps playing that long.
+        spircController->flushAudio = [audioSink]() { audioSink->flush(); };
+
+        spircController->setEventHandler([gui, audioSink](CSpotEvent &event) {
             switch (event.eventType) {
                 case CSpotEventType::TRACK_INFO:
                     if (auto t = std::get_if<TrackInfo>(&event.data)) {
@@ -189,6 +193,7 @@ int start_cspot(SceSize _args, void *_argp) {
                     break;
                 case CSpotEventType::PLAY_PAUSE:
                     if (auto p = std::get_if<bool>(&event.data)) {
+                        audioSink->setPaused(*p);
                         gui->player.setPaused(*p);
                     }
                     break;
@@ -199,10 +204,11 @@ int start_cspot(SceSize _args, void *_argp) {
                     break;
                 case CSpotEventType::LOAD:
                     gui->player.setPosition(0);
+                    gui->player.setLoading(true);
                     break;
                 case CSpotEventType::PLAYBACK_START:
                     gui->player.setPosition(0);
-                    gui->player.setPaused(false);
+                    gui->player.setLoading(false);
                     break;
                 case CSpotEventType::VOLUME:
                     if (auto p = std::get_if<int>(&event.data)) {
@@ -383,7 +389,35 @@ int main(void) {
     }
 
     configMan->deviceName = DEVICE_NAME;
-    configMan->format = AudioFormat_OGG_VORBIS_320;
+    {
+        // cspot defaults to 160 kb/s; ours is 320 until the user picks another
+        // quality in Settings, which saves "bitrate".
+        std::string cfg;
+        file->readFile(CONFIG_FILE_NAME, cfg);
+        if (cfg.find("\"bitrate\"") == std::string::npos) {
+            configMan->format = AudioFormat_OGG_VORBIS_320;
+        }
+    }
+    gui.quality_kbps = configMan->format == AudioFormat_OGG_VORBIS_96    ? 96
+                       : configMan->format == AudioFormat_OGG_VORBIS_160 ? 160
+                                                                        : 320;
+    GUI *gq = &gui;
+    gui.qualityCallback = [gq](int kbps) {
+        gq->quality_kbps = kbps;
+        // SpotifyTrack reads the format on the cspot thread: change it there
+        // once that thread runs. It applies from the next track on.
+        auto apply = [kbps] {
+            configMan->format = kbps == 96    ? AudioFormat_OGG_VORBIS_96
+                                : kbps == 160 ? AudioFormat_OGG_VORBIS_160
+                                              : AudioFormat_OGG_VORBIS_320;
+            configMan->save();
+        };
+        if (gq->cspot_started) {
+            queue_cspot(apply);
+        } else {
+            apply();
+        }
+    };
 
     blob = std::make_shared<LoginBlob>();
     dbg_mark("05-config");

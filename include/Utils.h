@@ -63,8 +63,11 @@ int download(const char *url, uint8_t **return_buffer, const char *method = "GET
 // means a single DNS resolve + TLS handshake instead of one per request. The
 // Vita's resolver chokes on rapid getaddrinfo bursts and the socket churn
 // starves the Mercury link into a crash; one reused connection avoids it.
+// With a body it POSTs it as contentType (protobuf requests such as the
+// collection pages).
 int spclient_get(const char *url, const std::string &bearer, uint8_t **return_buffer,
-                 long *status = nullptr, const char *accept = nullptr);
+                 long *status = nullptr, const char *accept = nullptr,
+                 const std::string *body = nullptr, const char *contentType = nullptr);
 bool cache_cover_art(std::string url, const uint8_t *buffer, uint32_t length);
 std::string cover_art_path(std::string url);
 bool is_cover_cached(std::string url);

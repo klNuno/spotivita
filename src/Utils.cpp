@@ -141,7 +141,7 @@ int download(const char *url, uint8_t **return_buffer, const char *method, std::
 
     if (post_data.size() != 0) {
         curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDS, post_data.c_str());
-        curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDSIZE, -1L);
+        curl_easy_setopt(curl_handle, CURLOPT_POSTFIELDSIZE, static_cast<long>(post_data.size()));
     } else if (strcmp(method, "GET") != 0) {
         // A bodiless PUT (seek, shuffle, repeat) must still say
         // "Content-Length: 0"; without it the Web API answers 411.
@@ -188,7 +188,7 @@ int download(const char *url, uint8_t **return_buffer, const char *method, std::
 static CURL *s_spclient_handle = NULL;
 
 int spclient_get(const char *url, const std::string &bearer, uint8_t **return_buffer, long *status,
-                 const char *accept) {
+                 const char *accept, const std::string *body, const char *contentType) {
     if (status != NULL) {
         *status = 0;
     }
@@ -230,6 +230,14 @@ int spclient_get(const char *url, const std::string &bearer, uint8_t **return_bu
         std::string acc = std::string("Accept: ") + accept;
         hl = curl_slist_append(hl, acc.c_str());
     }
+    if (body != NULL) {
+        curl_easy_setopt(h, CURLOPT_POSTFIELDS, body->data());
+        curl_easy_setopt(h, CURLOPT_POSTFIELDSIZE, static_cast<long>(body->size()));
+        if (contentType != NULL) {
+            std::string ct = std::string("Content-Type: ") + contentType;
+            hl = curl_slist_append(hl, ct.c_str());
+        }
+    }
     curl_easy_setopt(h, CURLOPT_HTTPHEADER, hl);
 
     CURLcode res = curl_easy_perform(h);
@@ -248,7 +256,7 @@ int spclient_get(const char *url, const std::string &bearer, uint8_t **return_bu
         *status = status_code;
     }
     if (status_code != 200) {
-        CSPOT_LOG(error, "spclient_get HTTP error: %ld", status_code);
+        CSPOT_LOG(error, "spclient HTTP %ld: %s", status_code, url);
         free(chunk.memory);
         *return_buffer = NULL;
         return 0;

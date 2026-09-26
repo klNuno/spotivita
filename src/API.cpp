@@ -137,7 +137,8 @@ ApiResult API::web(const char *method, const std::string &url, const std::string
     return r;
 }
 
-ApiResult API::spclient(const std::string &url, const char *accept) {
+ApiResult API::spclient(const std::string &url, const char *accept,
+                        const std::string *body, const char *contentType) {
     ApiResult r;
     if (!has_token()) {
         return r;
@@ -147,7 +148,7 @@ ApiResult API::spclient(const std::string &url, const char *accept) {
     for (int attempt = 0; attempt < 3; attempt++) {
         std::string tok = bearer(r.status == 401);
         uint8_t *buf = NULL;
-        int len = spclient_get(url.c_str(), tok, &buf, &r.status, accept);
+        int len = spclient_get(url.c_str(), tok, &buf, &r.status, accept, body, contentType);
         r.body.assign(buf != NULL ? reinterpret_cast<const char *>(buf) : "",
                       (buf != NULL && len > 0) ? static_cast<size_t>(len) : 0);
         free(buf);
@@ -158,20 +159,61 @@ ApiResult API::spclient(const std::string &url, const char *accept) {
     return r;
 }
 
+std::string API::user() const {
+    std::lock_guard<std::mutex> g(mutex_);
+    return user_;
+}
+
 // User's playlist list (rootlist). Response is playlist4 SelectedListContent
 // protobuf, NOT JSON. Replaces the rate-limited api.spotify.com/v1/me/playlists.
+// decorate=attributes adds a MetaItem per item with the playlist name, so the
+// whole library comes in one request.
 ApiResult API::get_rootlist() {
-    std::string user;
-    {
-        std::lock_guard<std::mutex> g(mutex_);
-        user = user_;
-    }
-    if (user.empty()) {
+    std::string u = user();
+    if (u.empty()) {
         return ApiResult();
     }
-    std::string url = SPCLIENT_BASE "/playlist/v2/user/" + urlencode(user) +
-                      "/rootlist?from=0&length=" + std::to_string(SPOTIFY_ROOTLIST_LENGTH);
+    std::string url = SPCLIENT_BASE "/playlist/v2/user/" + urlencode(u) +
+                      "/rootlist?decorate=revision,attributes,length&from=0&length=" +
+                      std::to_string(SPOTIFY_ROOTLIST_LENGTH);
     return spclient(url);
+}
+
+namespace {
+
+void pbPutVarint(std::string *out, uint64_t v) {
+    while (v >= 0x80) {
+        out->push_back(static_cast<char>((v & 0x7F) | 0x80));
+        v >>= 7;
+    }
+    out->push_back(static_cast<char>(v));
+}
+
+void pbPutString(std::string *out, int field, const std::string &s) {
+    pbPutVarint(out, (static_cast<uint64_t>(field) << 3) | 2);
+    pbPutVarint(out, s.size());
+    out->append(s);
+}
+
+}  // namespace
+
+// collection2v2 PageRequest { username=1, set=2, pagination_token=3, limit=4 };
+// the "collection" set holds the liked tracks.
+ApiResult API::get_liked_page(const std::string &pageToken, int limit) {
+    std::string u = user();
+    if (u.empty()) {
+        return ApiResult();
+    }
+    std::string body;
+    pbPutString(&body, 1, u);
+    pbPutString(&body, 2, "collection");
+    if (!pageToken.empty()) {
+        pbPutString(&body, 3, pageToken);
+    }
+    pbPutVarint(&body, (4 << 3) | 0);
+    pbPutVarint(&body, static_cast<uint64_t>(limit));
+    const char *type = "application/vnd.collection-v2.spotify.proto";
+    return spclient(SPCLIENT_BASE "/collection/v2/paging", type, &body, type);
 }
 
 // One playlist (protobuf): attributes carry the name, contents the item URIs.
@@ -187,13 +229,6 @@ ApiResult API::get_track_metadata(const std::string &trackId) {
     }
     return spclient(SPCLIENT_BASE "/metadata/4/track/" + gid + "?market=from_token",
                     "application/x-protobuf");
-}
-
-ApiResult API::get_playlist_tracks_web(const std::string &playlistId) {
-    std::string url = SPOTIFY_API_BASE "/playlists/" + playlistId +
-                      "/tracks?fields=items(track(name,uri,artists(name)))&limit=" +
-                      std::to_string(SPOTIFY_PLAYLIST_TRACK_LIMIT > 100 ? 100 : SPOTIFY_PLAYLIST_TRACK_LIMIT);
-    return web("GET", url);
 }
 
 // Search through the web player's GraphQL endpoint (pathfinder): the public

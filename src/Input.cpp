@@ -222,6 +222,10 @@ bool animating() {
     return !g_injected.empty();
 }
 
+bool back_pressed() {
+    return (g_pressed & g_cancel) != 0;
+}
+
 uint32_t pressed() {
     return g_pressed;
 }

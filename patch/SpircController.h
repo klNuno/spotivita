@@ -51,7 +51,16 @@ private:
 	void sendEvent(CSpotEventType eventType, std::variant<TrackInfo, int, bool> data = 0);
     void handleFrame(std::vector<uint8_t> &data);
     void loadTrack(uint32_t position_ms = 0, bool isPaused = 0);
+    void skipTo();
 public:
+    /**
+     * @brief Drops the PCM already queued in the sink
+     *
+     * The sink buffers about 1.5 s; without this a skip or a seek kept playing
+     * the old audio until the buffer drained.
+     */
+    std::function<void()> flushAudio = []() {};
+
     SpircController(std::shared_ptr<MercuryManager> manager, std::string username, std::shared_ptr<AudioSink> audioSink);
     ~SpircController();
     void subscribe();

@@ -82,13 +82,34 @@ std::string log_tail(size_t bytes) {
     return s_log.substr(s_log.size() - bytes);
 }
 
-ImFont* AddDefaultFont(float pixel_size) {
+ImFont* AddTextFont(const char *path, const char *fallbackPath, float pixel_size) {
     ImGuiIO &io = ImGui::GetIO();
     static const ImWchar ranges[] = {
         0x0020, 0x017F,  // Basic Latin + Latin-1 Supplement + Latin Extended-A
+        0x2010, 0x2027,  // dashes, curly quotes, bullet, ellipsis
+        0x2030, 0x203A,
+        0x20AC, 0x20AC,  // euro
         0,
     };
-    return io.Fonts->AddFontFromFileTTF("app0:PlusJakartaSans-Regular.ttf", pixel_size, NULL, ranges);
+    // Plus Jakarta Sans has no Greek or Cyrillic: Roboto fills them in, and
+    // whatever Jakarta lacks in the ranges above. The first font wins a glyph.
+    static const ImWchar fallback[] = {
+        0x0370, 0x03FF,  // Greek
+        0x0400, 0x04FF,  // Cyrillic
+        0x2010, 0x2027,
+        0x2030, 0x203A,
+        0x20AC, 0x20AC,
+        0,
+    };
+    ImFont *font = io.Fonts->AddFontFromFileTTF(path, pixel_size, NULL, ranges);
+    ImFontConfig merge;
+    merge.MergeMode = true;
+    io.Fonts->AddFontFromFileTTF(fallbackPath, pixel_size, &merge, fallback);
+    return font;
+}
+
+ImFont* AddDefaultFont(float pixel_size) {
+    return AddTextFont("app0:PlusJakartaSans-Regular.ttf", "app0:Roboto-Regular.ttf", pixel_size);
 }
 
 void AlignForWidth(float width, float alignment) {

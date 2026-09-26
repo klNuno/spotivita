@@ -5,6 +5,7 @@
 #include <psp2/audioout.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/appmgr.h>
+#include <atomic>
 #include <cstring>
 
 #define ONE_BUFFER_SIZE       4096
@@ -16,12 +17,15 @@
 
 static int port;
 static int end_flag = 0;
+static std::atomic<bool> paused{false};
 static CircularBuffer buffer(CIRCULAR_BUFFER_SIZE);
 
 static int feedBlocking() {
     static uint8_t current_buffer[ONE_BUFFER_SIZE];
     while (end_flag == 0) {
-        if (buffer.size() >= ONE_BUFFER_SIZE) {
+        if (paused) {
+            sceKernelDelayThread(10000);
+        } else if (buffer.size() >= ONE_BUFFER_SIZE) {
             auto readNumber = buffer.read(current_buffer, ONE_BUFFER_SIZE);
             if (readNumber != ONE_BUFFER_SIZE) {
                 CSPOT_LOG(error, "buffer error");
@@ -45,6 +49,7 @@ VitaAudioSink::VitaAudioSink() {
     // end_flag is a file-static and would otherwise stay 1 from a prior dtor,
     // making the new feed thread exit immediately (no audio).
     end_flag = 0;
+    paused = false;
     buffer.emptyBuffer();
 
     sceAppMgrReleaseBgmPort();
@@ -85,6 +90,14 @@ void VitaAudioSink::feedPCMFrames(const uint8_t *buf, size_t bytes) {
             sceKernelDelayThread(10000);
         }
     }
+}
+
+void VitaAudioSink::setPaused(bool p) {
+    paused = p;
+}
+
+void VitaAudioSink::flush() {
+    buffer.emptyBuffer();
 }
 
 void VitaAudioSink::volumeChanged(uint16_t volume) {
