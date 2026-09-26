@@ -38,6 +38,16 @@ jobs:
         apt-get update
         apt-get install -y --no-install-recommends protobuf-compiler python3-protobuf python3-setuptools
 
+    # The full image resolves curl's openssl dependency with openssl-1.1.1,
+    # but vdpm's libcurl.a is built against the 1.0.2 API (SSLeay,
+    # EVP_MD_CTX_create): the link fails. Put the 1.0.2 package back.
+    - name: Swap OpenSSL 1.1.1 for 1.0.2
+      env:
+        VDPM_NONINTERACTIVE: 1
+      run: |
+        vdpm remove -dd openssl-1.1.1
+        vdpm install openssl
+
     - name: Build VPK
       run: |
         mkdir build && cd build
