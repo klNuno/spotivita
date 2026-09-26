@@ -8,7 +8,7 @@ ux0:data/cspot/loopback present). One command per call, or several with ';':
   vitactl.py tap 700 200
   vitactl.py swipe 700 450 700 150 [frames]
   vitactl.py press start          (cross circle square triangle up down left right l r start select, '+' joins)
-  vitactl.py ui search daft punk  (tab NAME, search Q, open N, back, refresh, toast TEXT, screen login|playback)
+  vitactl.py ui search daft punk  (tab NAME, search Q, open N, folder N, back, play N, quality 96|160|320, refresh, toast TEXT, screen login|playback)
   vitactl.py shot out.png         (BMP from the device, converted to PNG when Pillow is present;
                                    under Vita3K the guest framebuffer stays black: use vita3k.ps1 shot)
   vitactl.py log [bytes]
@@ -116,14 +116,14 @@ def local_prefix():
 
 def answers(host):
     try:
-        return Link(host, timeout=0.4).text("ping") == "OK pong"
+        return Link(host, timeout=1.5).text("ping") == "OK pong"
     except OSError:
         return False
 
 
 def listens(host, port=VC_PORT):
     try:
-        socket.create_connection((host, port), timeout=0.4).close()
+        socket.create_connection((host, port), timeout=1.5).close()
         return True
     except OSError:
         return False
@@ -254,7 +254,12 @@ def main():
     for part in " ".join(args.command).split(";"):
         part = part.strip()
         if part:
-            rc = run(args.host, part.split()) or rc
+            try:
+                rc = run(args.host, part.split()) or rc
+            except OSError as e:
+                print(f"ERR {args.host}:{PORT} unreachable ({e}). App closed, console asleep, "
+                      "or a release build without the devkit?")
+                return 1
     return rc
 
 

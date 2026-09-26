@@ -52,7 +52,7 @@ def local_prefix():
 
 def ftp_banner(host):
     try:
-        with socket.create_connection((host, FTP_PORT), timeout=0.4) as s:
+        with socket.create_connection((host, FTP_PORT), timeout=1.5) as s:
             s.settimeout(2.0)
             return s.recv(256).startswith(b"220")
     except OSError:
