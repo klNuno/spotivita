@@ -56,5 +56,12 @@ The server can read and write files on the console, so release builds leave it
 out. On a PC, `tools/vita3k` boots the same build in the Vita3K emulator on a
 hidden desktop (see its README).
 
+To prepare a console once, open VitaShell, press SELECT (FTP) and run
+`python tools/vitasetup.py`, then reboot the Vita. It installs
+[vitacompanion](https://github.com/devnoname120/vitacompanion) (FTP on 1337,
+launch/quit/reboot on 1338, no auto-suspend) and copies the dev build over the
+installed app. `vitactl deploy` then works even when the app is not running,
+and `vitactl vc <command>` sends a raw vitacompanion command.
+
 ### Disclaimer
 Using this code to connect to Spotify's API may be prohibited by their terms of service. Use at your own risk. The developers are not responsible for any negative consequences, including account closure.

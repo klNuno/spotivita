@@ -14,11 +14,19 @@ ux0:data/cspot/loopback present). One command per call, or several with ';':
   vitactl.py log [bytes]
   vitactl.py get ux0:data/cspot/log.txt local.txt
   vitactl.py put local_eboot.bin ux0:app/PSVITIFY1/eboot.bin
-  vitactl.py deploy build/dev/eboot.bin   (put eboot + relaunch, then wait for the app to answer)
+  vitactl.py deploy build/dev/eboot.bin   (put eboot + relaunch, then wait for the app to answer;
+                                   when the app is down, FTP + relaunch through vitacompanion)
   vitactl.py wait [seconds]       (poll until the app answers ping)
-  vitactl.py find [a.b.c]         (scan a.b.c.1-254, default this PC's /24, for a devkit build)
+  vitactl.py find [a.b.c]         (scan a.b.c.1-254, default this PC's /24, for a devkit build
+                                   or vitacompanion)
+  vitactl.py vc launch PSVITIFY1  (raw vitacompanion command on port 1338: launch, quit, reboot,
+                                   screen on|off, press, release; one per call, no ';')
+
+vitacompanion is installed once with tools/vitasetup.py.
 """
 import argparse
+import ftplib
+import io
 import json
 import os
 import socket
@@ -27,6 +35,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 PORT = 2138
+FTP_PORT = 1337
+VC_PORT = 1338
 TITLE_ID = "PSVITIFY1"
 
 
@@ -111,15 +121,63 @@ def answers(host):
         return False
 
 
+def listens(host, port=VC_PORT):
+    try:
+        socket.create_connection((host, port), timeout=0.4).close()
+        return True
+    except OSError:
+        return False
+
+
+def probe(host):
+    return [name for name, ok in (("devkit", answers(host)),
+                                  ("vitacompanion", listens(host))) if ok]
+
+
 def find(prefix):
     hosts = ["%s.%d" % (prefix, i) for i in range(1, 255)]
     with ThreadPoolExecutor(max_workers=64) as pool:
-        found = [h for h, ok in zip(hosts, pool.map(answers, hosts)) if ok]
-    for h in found:
-        print("OK", h)
+        found = [(h, what) for h, what in zip(hosts, pool.map(probe, hosts)) if what]
+    for h, what in found:
+        print("OK", h, " ".join(what))
     if not found:
-        print("ERR no devkit build answers on %s.0/24" % prefix)
+        print("ERR no devkit build or vitacompanion on %s.0/24" % prefix)
     return 0 if found else 1
+
+
+def vc(host, line):
+    """One vitacompanion command; returns what it answered before closing."""
+    with socket.create_connection((host, VC_PORT), timeout=5.0) as s:
+        s.sendall((line + "\n").encode("utf-8"))
+        s.shutdown(socket.SHUT_WR)
+        out = b""
+        try:
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                out += chunk
+        except socket.timeout:
+            pass
+    return out.decode("utf-8", "replace").strip()
+
+
+def deploy_cold(host, local):
+    """The app is down: quit it, FTP the eboot, launch it through vitacompanion."""
+    remote = "/ux0:/app/%s/eboot.bin" % TITLE_ID
+    print(vc(host, "quit " + TITLE_ID) or "OK quit")
+    with open(local, "rb") as f:
+        data = f.read()
+    ftp = ftplib.FTP()
+    ftp.connect(host, FTP_PORT, timeout=30)
+    ftp.login()
+    ftp.storbinary("STOR " + remote, io.BytesIO(data))
+    ftp.quit()
+    print("OK ftp", remote[1:], len(data))
+    print(vc(host, "launch " + TITLE_ID) or "OK launch")
+    ok = wait_ready(host, 40)
+    print("OK relaunched" if ok else "ERR app did not come back")
+    return 0 if ok else 1
 
 
 def run(host, argv):
@@ -130,6 +188,12 @@ def run(host, argv):
         ok = wait_ready(host, float(argv[1]) if len(argv) > 1 else 30)
         print("OK ready" if ok else "ERR no answer")
         return 0 if ok else 1
+    if cmd == "vc":
+        r = vc(host, " ".join(argv[1:]))
+        print(r or "OK")
+        return 1 if r.lower().startswith(("err", "unknown", "invalid")) else 0
+    if cmd == "deploy" and not answers(host) and listens(host):
+        return deploy_cold(host, argv[1])
     link = Link(host)
     if cmd == "state":
         r = link.text("state")
