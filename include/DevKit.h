@@ -17,6 +17,10 @@ class GUI;
 //   log [BYTES]               -> OK <len>\n<text>
 //   get PATH                  -> OK <len>\n<bytes>
 //   put PATH LEN\n<bytes>     -> OK
+//   netdrop [write]           -> OK            (shuts the AP socket, as a Wi-Fi loss, or
+//                                              fails its next send;
+//                                              ux0:data/cspot/ap_override, read on each
+//                                              connection, can keep the AP unreachable)
 //   relaunch                  -> OK, then the app restarts from app0:eboot.bin
 //   quit                      -> OK, then the app exits
 namespace DevKit {

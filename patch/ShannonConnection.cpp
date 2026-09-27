@@ -1,5 +1,7 @@
 #include "ShannonConnection.h"
 #include <stdexcept>
+#include <mutex>
+#include <sys/socket.h>
 #include "Logger.h"
 
 ShannonConnection::ShannonConnection()
@@ -26,14 +28,19 @@ void ShannonConnection::wrapConnection(std::shared_ptr<PlainConnection> conn, st
     this->recvCipher->nonce(pack<uint32_t>(htonl(0)));
 }
 
+// VITA PATCH: a failed write used to throw with writeMutex still locked. The
+// next ping reply then blocked the recv thread for good (Spotify silent until
+// the app restarts), and a throw on the player thread went through libvorbis
+// and aborted. Now a failed write shuts the socket down and returns: the recv
+// thread sees the closed link and reconnects, and the reconnect fails pending
+// chunks, which their readers ask for again.
 void ShannonConnection::sendPacket(uint8_t cmd, std::vector<uint8_t> &data)
 {
-    this->writeMutex.lock();
+    std::lock_guard<WrappedMutex> guard(this->writeMutex);
     auto rawPacket = this->cipherPacket(cmd, data);
 
     // Shannon encrypt the packet and write it to sock
     this->sendCipher->encrypt(rawPacket);
-    this->conn->writeBlock(rawPacket);
 
     // Generate mac
     std::vector<uint8_t> mac(MAC_SIZE);
@@ -43,14 +50,24 @@ void ShannonConnection::sendPacket(uint8_t cmd, std::vector<uint8_t> &data)
     this->sendNonce += 1;
     this->sendCipher->nonce(pack<uint32_t>(htonl(this->sendNonce)));
 
-    // Write the mac to sock
-    this->conn->writeBlock(mac);
-    this->writeMutex.unlock();
+    try
+    {
+        this->conn->writeBlock(rawPacket);
+        this->conn->writeBlock(mac);
+    }
+    catch (const std::exception &e)
+    {
+        CSPOT_LOG(error, "Shannon write failed (%s), dropping the link", e.what());
+        if (this->conn->apSock >= 0)
+        {
+            shutdown(this->conn->apSock, SHUT_RDWR);
+        }
+    }
 }
 
 std::unique_ptr<Packet> ShannonConnection::recvPacket()
 {
-    this->readMutex.lock();
+    std::lock_guard<WrappedMutex> guard(this->readMutex);
     // Receive 3 bytes, cmd + int16 size
     auto data = this->conn->readBlock(3);
     this->recvCipher->decrypt(data);
@@ -82,7 +99,6 @@ std::unique_ptr<Packet> ShannonConnection::recvPacket()
         // console). Throw instead: MercuryManager already catches
         // runtime_error from recvPacket and runs its reconnection path, which
         // rebuilds the session with fresh Shannon keys and resubscribes.
-        this->readMutex.unlock();
         CSPOT_LOG(error, "Shannon read: Mac doesn't match, resetting connection");
         throw std::runtime_error("shannon mac mismatch");
     }
@@ -90,9 +106,6 @@ std::unique_ptr<Packet> ShannonConnection::recvPacket()
     // Update the nonce
     this->recvNonce += 1;
     this->recvCipher->nonce(pack<uint32_t>(htonl(this->recvNonce)));
-
-    // Unlock the mutex
-    this->readMutex.unlock();
 
     // data[0] == cmd
     return std::make_unique<Packet>(data[0], packetData);

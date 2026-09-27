@@ -105,6 +105,9 @@ public:
   // Clears the key callback if owner set it (any owner when null).
   void freeAudioKeyCallback(const void *owner = nullptr);
   void reconnect();
+  // Spotivita devkit: shuts the AP socket down, as a Wi-Fi loss would, or with
+  // writeOnly makes the next send fail. False while a reconnect runs.
+  bool dropLink(bool writeOnly = false);
 };
 
 #endif

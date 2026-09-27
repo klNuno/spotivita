@@ -9,10 +9,12 @@
 
 #include <curl/curl.h>
 
+#include <cctype>
 #include <cstring>
 #include <cstdarg>
 #include <cstdio>
 #include <deque>
+#include <fstream>
 #include <functional>
 #include <memory>
 #include <mutex>  // NOLINT
@@ -152,16 +154,52 @@ void start_zeroconf_thread(GUI *gui) {
     sceKernelStartThread(zeroconf_id, sizeof(void*), &gui);
 }
 
+// patch/ApResolve.cpp asks this on every connection to the access point. In
+// devkit builds ux0:data/cspot/ap_override names one ("host:port"): a name
+// that does not resolve plays a network loss, at login and on reconnects.
+std::string spotivita_ap_override() {
+    std::string ap;
+#ifdef SPOTIVITA_DEVKIT
+    std::ifstream in("ux0:data/cspot/ap_override");
+    std::getline(in, ap);
+    while (!ap.empty() && isspace(static_cast<unsigned char>(ap.back()))) ap.pop_back();
+#endif
+    return ap;
+}
+
+#ifdef SPOTIVITA_DEVKIT
+// DevKit "netdrop": cuts the AP link as a Wi-Fi loss would.
+bool devkit_drop_link(bool writeOnly) {
+    std::shared_ptr<MercuryManager> m = mercuryManager;
+    return m != nullptr && m->isRunning && m->dropLink(writeOnly);
+}
+#endif
+
 int start_cspot(SceSize _args, void *_argp) {
     GUI* gui = *((GUI**)_argp);
 
     CSPOT_LOG(info, "Creating player");
-    auto session = std::make_unique<Session>();
-    session->connectWithRandomAp();
-    auto token = session->authenticate(blob);
+    // Without network (Wi-Fi off, console just woke up) the connection throws:
+    // uncaught, that aborted the whole app. Retry until it comes back.
+    std::unique_ptr<Session> session;
+    std::vector<uint8_t> token;
+    while (gui->isRunning) {
+        try {
+            session = std::make_unique<Session>();
+            session->connectWithRandomAp();
+            token = session->authenticate(blob);
+            break;
+        } catch (const std::exception &e) {
+            CSPOT_LOG(error, "Spotify login failed (%s), retrying in 5 s", e.what());
+        } catch (...) {
+            CSPOT_LOG(error, "Spotify login failed, retrying in 5 s");
+        }
+        session.reset();
+        sceKernelDelayThread(5 * 1000 * 1000);
+    }
 
     // Auth successful
-    if (token.size() > 0) {
+    if (token.size() > 0 && gui->isRunning) {
         // credentials ok, save for later
         file->writeFile(CREDENTIALS_FILE_NAME, blob->toJson());
 
@@ -258,7 +296,8 @@ int start_cspot(SceSize _args, void *_argp) {
         };
 
         mercuryManager->reconnectedCallback = []() {
-            return spircController->subscribe();
+            spircController->subscribe();
+            queue_cspot([] { spircController->reloadAfterReconnect(); });
         };
 
         // Controls are wired: only now is it safe to let the UI call them.

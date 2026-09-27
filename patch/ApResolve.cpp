@@ -90,8 +90,17 @@ std::string ApResolve::getApList()
 // (re)connect directly instead of giving up.
 #define AP_FALLBACK "ap-gew1.spotify.com:4070"
 
+// main.cpp: in devkit builds, the AP named in ux0:data/cspot/ap_override, read
+// on every connection (a name that does not resolve plays a network loss).
+std::string spotivita_ap_override();
+
 std::string ApResolve::fetchFirstApAddress()
 {
+    std::string forced = spotivita_ap_override();
+    if (!forced.empty())
+    {
+        return forced;
+    }
     if (configMan->apOverride != "")
     {
         return configMan->apOverride;

@@ -80,8 +80,15 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/bell/HTTPServer.cpp
 # Shannon MAC mismatch = desynced stream cipher. Upstream logged and kept
 # reading garbage in a tight loop (starved the GUI mid-GPU-frame and wedged the
 # whole console). The patch throws so MercuryManager's existing reconnection
-# path rebuilds the session cleanly.
+# path rebuilds the session cleanly. A failed write left writeMutex locked, so
+# the next ping reply hung the recv thread (Spotify gone until a restart); it
+# now shuts the socket down instead of throwing, and the recv thread reconnects.
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/ShannonConnection.cpp
+     DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/src)
+# Network loss: upstream read an uninitialised addrinfo list after a failed DNS
+# lookup (crash on every reconnect without Wi-Fi), spun on a closed socket and
+# added a -1 read count to its index. The patch throws on each failure instead.
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/PlainConnection.cpp
      DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/src)
 # Reconnect path is exception-unsafe: recvPacket/reconnectedCallback (spirc
 # subscribe) throw std::runtime_error on a blipped AP link, and the throw

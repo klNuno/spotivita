@@ -46,6 +46,8 @@ private:
     // load reads these instead, and a pause asked then holds once it loads.
     std::atomic<bool> loading{false};
     std::atomic<bool> pausedWhileLoading{false};
+    uint32_t loadPositionMs = 0;   // arguments of the running load, for reloadAfterReconnect
+    bool loadPaused = false;
     std::unique_ptr<Player> player;
     std::unique_ptr<PlayerState> state;
     std::shared_ptr<AudioSink> audioSink;
@@ -77,6 +79,14 @@ public:
     SpircController(std::shared_ptr<MercuryManager> manager, std::string username, std::shared_ptr<AudioSink> audioSink);
     ~SpircController();
     void subscribe();
+
+    /**
+     * @brief Loads the current track again if a load was running (cspot thread)
+     *
+     * Its metadata or audio key request may have gone out on the link that
+     * died, and that answer never comes: the track then never started.
+     */
+    void reloadAfterReconnect();
 
     /** 
      * @brief Pauses / Plays current song

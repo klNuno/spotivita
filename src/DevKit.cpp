@@ -33,6 +33,8 @@
 #include "Input.h"
 #include "Utils.h"
 
+bool devkit_drop_link(bool writeOnly);   // main.cpp
+
 namespace DevKit {
 namespace {
 
@@ -193,6 +195,11 @@ void serve(int fd) {
         in >> cmd;
         if (cmd == "ping") {
             sendText(fd, "OK pong\n");
+        } else if (cmd == "netdrop") {
+            std::string side;
+            in >> side;
+            sendText(fd, devkit_drop_link(side == "write") ? "OK\n"
+                                                         : "ERR no AP link (not logged in or reconnecting)\n");
         } else if (cmd == "state") {
             std::string s = callOnGui([] { return g_gui->debugState(); });
             sendText(fd, "OK " + s + "\n");

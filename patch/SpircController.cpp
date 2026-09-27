@@ -327,11 +327,19 @@ void SpircController::setRepeat(int mode) {
     notify();
 }
 
+void SpircController::reloadAfterReconnect() {
+    if (!loading) return;
+    CSPOT_LOG(info, "Reconnected during a load, loading the track again");
+    loadTrack(loadPositionMs, loadPaused || pausedWhileLoading);
+}
+
 void SpircController::loadTrack(uint32_t position_ms, bool isPaused) {
     sendEvent(CSpotEventType::LOAD, (int) position_ms);
     state->setPlaybackState(PlaybackState::Loading);
     pausedWhileLoading = false;
     loading = true;
+    loadPositionMs = position_ms;
+    loadPaused = isPaused;
     std::function<void()> loadedLambda = [=]() {
         // Loading finished, notify that playback started. A pause asked while
         // it loaded (a tap, the sleep timer) holds.

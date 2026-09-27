@@ -2,6 +2,8 @@
 #include <iostream>
 #include "Logger.h"
 
+void spotivita_fail_next_write();   // PlainConnection.cpp
+
 std::map<MercuryType, std::string> MercuryTypeMap({
     {MercuryType::GET, "GET"},
     {MercuryType::SEND, "SEND"},
@@ -163,6 +165,25 @@ RECONNECT:
         goto RECONNECT;
         //reconnect();
     }
+}
+
+bool MercuryManager::dropLink(bool writeOnly)
+{
+    std::unique_lock<std::mutex> guard(this->reconnectionMutex, std::try_to_lock);
+    if (!guard.owns_lock() || this->session == nullptr || this->session->shanConn == nullptr ||
+        this->session->shanConn->conn == nullptr || this->session->shanConn->conn->apSock < 0)
+    {
+        return false;
+    }
+    if (writeOnly)
+    {
+        CSPOT_LOG(info, "devkit: the next write on the AP link fails");
+        spotivita_fail_next_write();
+        return true;
+    }
+    CSPOT_LOG(info, "devkit: dropping the AP link");
+    shutdown(this->session->shanConn->conn->apSock, SHUT_RDWR);
+    return true;
 }
 
 void MercuryManager::runTask()
