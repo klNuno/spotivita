@@ -54,6 +54,8 @@ bool loopback_mode();
 // cancellation through the calling thread's pthread record, which a raw
 // sceKernelCreateThread thread does not have (NULL write, then a crash).
 bool start_pthread(void *(*fn)(void *), void *arg, size_t stack_size);
+// OpenSSL locking callbacks; call once before any thread uses curl.
+void init_tls_locks();
 // Same user agent and TLS checks as download(), for a curl handle made
 // elsewhere (the dealer websocket).
 void curl_apply_tls(void *curlHandle);

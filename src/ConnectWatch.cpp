@@ -264,6 +264,10 @@ void ConnectWatch::applyCluster(cJSON *cluster) {
     char *printed = cJSON_PrintUnformatted(cluster);
     std::lock_guard<std::mutex> g(mutex_);
     clusters_++;
+    if (s.activeId != state_.activeId || s.playing != state_.playing || s.trackUri != state_.trackUri) {
+        CSPOT_LOG(info, "cluster: %s %s %s", s.deviceName.empty() ? "(none)" : s.deviceName.c_str(),
+                  s.playing ? "playing" : "paused", s.trackUri.c_str());
+    }
     if (!injected_) {
         s.version = state_.version + 1;
         state_ = s;

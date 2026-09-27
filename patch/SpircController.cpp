@@ -134,6 +134,28 @@ void SpircController::handleFrame(std::vector<uint8_t> &data) {
     pb_release(Frame_fields, &state->remoteFrame);
     pbDecode(state->remoteFrame, Frame_fields, data);
 
+    // Every spirc device of the account gets every frame: a phone that loads
+    // a song on the PC sends it to all of them. Upstream cspot ran them all,
+    // so the Vita played what was meant for the PC and took it over. Like
+    // librespot, act only on frames from another device that name this one
+    // or nobody.
+    const char *self = state->innerFrame.ident != NULL ? state->innerFrame.ident : "";
+    const char *from = state->remoteFrame.ident != NULL ? state->remoteFrame.ident : "";
+    std::string to;
+    bool forUs = state->remoteFrame.recipient_count == 0;
+    for (pb_size_t i = 0; i < state->remoteFrame.recipient_count; i++) {
+        const char *r = state->remoteFrame.recipient[i];
+        if (r == NULL) continue;
+        if (!to.empty()) to += ",";
+        to += std::string(r).substr(0, 8);
+        if (strcmp(r, self) == 0) forUs = true;
+    }
+    bool mine = strcmp(from, self) == 0;
+    CSPOT_LOG(info, "spirc frame %d from %.8s to [%s] active=%d%s", (int) state->remoteFrame.typ, from,
+              to.c_str(), (int) state->remoteFrame.device_state.is_active,
+              mine || !forUs ? ", ignored" : "");
+    if (mine || !forUs) return;
+
     switch (state->remoteFrame.typ) {
     case MessageType_kMessageTypeNotify: {
         CSPOT_LOG(debug, "Notify frame");

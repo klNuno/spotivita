@@ -1603,10 +1603,12 @@ void PlaybackScreen::tickConnect(const PlayerModel::Snapshot& local) {
         // The other device started last: this one steps aside, like Spotify.
         if (handledRemoteStart == remoteStartUs) return;
         handledRemoteStart = remoteStartUs;
+        CSPOT_LOG(info, "connect: %s started, pausing here", remote.deviceName.c_str());
         gui->yieldCallback();
         gui->toast("Playing on " + remote.deviceName + ", paused here.");
     } else if (now - localStartUs > TAKEOVER_GRACE_US && handledLocalStart != localStartUs) {
         handledLocalStart = localStartUs;
+        CSPOT_LOG(info, "connect: %s still plays, pausing it", remote.deviceName.c_str());
         remoteCommand("pause");
         gui->toast("Paused " + remote.deviceName + ".");
     }

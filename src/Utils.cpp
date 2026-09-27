@@ -1,5 +1,7 @@
 #include "Utils.h"
 #include <curl/curl.h>
+#include <openssl/crypto.h>
+#include <psp2/kernel/threadmgr.h>
 #include <psp2/net/netctl.h>
 #include <psp2/sysmodule.h>
 #include <psp2/io/stat.h>
@@ -107,6 +109,35 @@ static long verify_host_level() {
         }
     }
     return level;
+}
+
+// libcurl's OpenSSL 1.0.2 shares its tables (error strings, ex_data, the
+// session cache) between threads only through these callbacks. Without them
+// two threads in a TLS handshake at once (the cspot login, the net worker, the
+// Connect websocket) corrupt a hash table: a jump to 0 in lhash getrn. Kernel
+// mutexes, not pthread ones: the cspot thread is a raw sceKernel thread.
+static SceUID *tls_locks = nullptr;
+
+static void tls_lock(int mode, int n, const char *, int) {
+    if (mode & CRYPTO_LOCK) {
+        sceKernelLockMutex(tls_locks[n], 1, NULL);
+    } else {
+        sceKernelUnlockMutex(tls_locks[n], 1);
+    }
+}
+
+static void tls_thread_id(CRYPTO_THREADID *id) {
+    CRYPTO_THREADID_set_numeric(id, static_cast<uint32_t>(sceKernelGetThreadId()));
+}
+
+void init_tls_locks() {
+    int n = CRYPTO_num_locks();
+    tls_locks = new SceUID[n];
+    for (int i = 0; i < n; i++) {
+        tls_locks[i] = sceKernelCreateMutex("tls_lock", 0, 0, NULL);
+    }
+    CRYPTO_THREADID_set_callback(tls_thread_id);
+    CRYPTO_set_locking_callback(tls_lock);
 }
 
 void curl_apply_tls(void *handle) {

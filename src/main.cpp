@@ -384,6 +384,7 @@ int main(void) {
     // init is not thread-safe, and at boot the login5 fetch (cspot thread) and
     // the first playlist fetch (GUI thread) can race it, corrupting libcurl /
     // OpenSSL global state.
+    init_tls_locks();
     curl_global_init(CURL_GLOBAL_ALL);
     dbg_mark("03-network");
 
