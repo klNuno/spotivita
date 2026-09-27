@@ -850,13 +850,24 @@ void PlaybackScreen::drawTrackMenu() {
     ImGui::SetNextWindowPos(ImVec2(480.0f, 272.0f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(ImVec2(w, 0.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 14.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 12.0f);
-    ImGui::PushStyleColor(ImGuiCol_PopupBg, COL_CARD);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, IM_COL32(0, 0, 0, 0));
     bool open = ImGui::BeginPopup("##trackmenu");
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(2);
     if (!open) return;
     popupOpen = true;
+    // Dim the whole screen behind the card, like a modal: over a bright
+    // player and list, a bare card read as a glitch cutting them in half.
+    // The popup draws its own background after the dim, so it stays lit.
+    {
+        ImDrawList *dl = ImGui::GetWindowDrawList();
+        ImVec2 wp = ImGui::GetWindowPos(), ws = ImGui::GetWindowSize();
+        dl->PushClipRectFullScreen();
+        dl->AddRectFilled(ImVec2(0.0f, 0.0f), ImGui::GetIO().DisplaySize, IM_COL32(0, 0, 0, 170));
+        dl->AddRectFilled(wp, ImVec2(wp.x + ws.x, wp.y + ws.y), COL_CARD, 12.0f);
+        dl->PopClipRect();
+    }
     if (menu.uri.empty()) {   // closed by a debug command
         ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
