@@ -33,6 +33,7 @@ import os
 import socket
 import sys
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
 PORT = 2138
@@ -163,6 +164,32 @@ def vc(host, line):
     return out.decode("utf-8", "replace").strip()
 
 
+def sync_assets(ftp, build_dir):
+    """Upload the VPK's top-level files (fonts, certificates) the console lacks or holds
+    at another size. A new asset only reaches the console through the VPK, and an eboot
+    that expects it crashes at boot without it."""
+    # The newest one: a build dir can keep a VPK from before a rename.
+    vpks = sorted((n for n in os.listdir(build_dir) if n.endswith(".vpk")),
+                  key=lambda n: os.path.getmtime(os.path.join(build_dir, n)), reverse=True)
+    if not vpks:
+        return
+    remote_dir = "/ux0:/app/%s/" % TITLE_ID
+    have = {}
+    lines = []
+    ftp.retrlines("LIST " + remote_dir, lines.append)
+    for line in lines:
+        parts = line.split(None, 8)
+        if len(parts) == 9 and parts[4].isdigit():
+            have[parts[8]] = int(parts[4])
+    with zipfile.ZipFile(os.path.join(build_dir, vpks[0])) as z:
+        for info in z.infolist():
+            name = info.filename
+            if "/" in name or name == "eboot.bin" or have.get(name) == info.file_size:
+                continue
+            ftp.storbinary("STOR " + remote_dir + name, io.BytesIO(z.read(info)))
+            print("OK ftp", name, info.file_size)
+
+
 def deploy_ftp(host, local):
     """FTP the eboot: vitacompanion (quit, upload, launch) or VitaShell's FTP (upload only).
 
@@ -172,11 +199,14 @@ def deploy_ftp(host, local):
     companion = listens(host, VC_PORT)
     if companion:
         print(vc(host, "quit " + TITLE_ID) or "OK quit")
+        # Right after a quit the app folder still refuses writes ("550 File not found").
+        time.sleep(2.0)
     with open(local, "rb") as f:
         data = f.read()
     ftp = ftplib.FTP()
     ftp.connect(host, FTP_PORT, timeout=30)
     ftp.login()
+    sync_assets(ftp, os.path.dirname(os.path.abspath(local)))
     ftp.storbinary("STOR " + remote, io.BytesIO(data))
     ftp.quit()
     print("OK ftp", remote[1:], len(data))

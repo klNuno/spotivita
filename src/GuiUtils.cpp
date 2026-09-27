@@ -1,3 +1,4 @@
+#include <psp2/io/stat.h>
 #include <cstdarg>
 #include <cstdio>
 #include <mutex>  // NOLINT
@@ -101,7 +102,18 @@ ImFont* AddTextFont(const char *path, const char *fallbackPath, float pixel_size
         0x20AC, 0x20AC,
         0,
     };
+    // ImGui asserts on a missing file, which killed the app at boot when only
+    // eboot.bin was copied over an install without the Roboto files.
+    SceIoStat st;
+    if (sceIoGetstat(path, &st) < 0) {
+        print_to_menu("font missing: %s\n", path);
+        return io.Fonts->AddFontDefault();
+    }
     ImFont *font = io.Fonts->AddFontFromFileTTF(path, pixel_size, NULL, ranges);
+    if (sceIoGetstat(fallbackPath, &st) < 0) {
+        print_to_menu("font missing: %s\n", fallbackPath);
+        return font;
+    }
     ImFontConfig merge;
     merge.MergeMode = true;
     io.Fonts->AddFontFromFileTTF(fallbackPath, pixel_size, &merge, fallback);
