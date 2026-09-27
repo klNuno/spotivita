@@ -14,8 +14,9 @@ ux0:data/cspot/loopback present). One command per call, or several with ';':
   vitactl.py log [bytes]
   vitactl.py get ux0:data/cspot/log.txt local.txt
   vitactl.py put local_eboot.bin ux0:app/SPOTIVITA/eboot.bin
-  vitactl.py deploy build/dev/eboot.bin   (put eboot + relaunch, then wait for the app to answer;
-                                   when the app is down, FTP + relaunch through vitacompanion)
+  vitactl.py deploy build/dev/eboot.bin   (FTP on port 1337 when it answers: vitacompanion quits,
+                                   uploads and relaunches, VitaShell's FTP only uploads; otherwise
+                                   devkit put + relaunch, which works under Vita3K only)
   vitactl.py wait [seconds]       (poll until the app answers ping)
   vitactl.py find [a.b.c]         (scan a.b.c.1-254, default this PC's /24, for a devkit build
                                    or vitacompanion)
@@ -162,10 +163,15 @@ def vc(host, line):
     return out.decode("utf-8", "replace").strip()
 
 
-def deploy_cold(host, local):
-    """The app is down: quit it, FTP the eboot, launch it through vitacompanion."""
+def deploy_ftp(host, local):
+    """FTP the eboot: vitacompanion (quit, upload, launch) or VitaShell's FTP (upload only).
+
+    On hardware a running app cannot write its own ux0:app folder, so the devkit
+    `put` of an eboot only works under Vita3K."""
     remote = "/ux0:/app/%s/eboot.bin" % TITLE_ID
-    print(vc(host, "quit " + TITLE_ID) or "OK quit")
+    companion = listens(host, VC_PORT)
+    if companion:
+        print(vc(host, "quit " + TITLE_ID) or "OK quit")
     with open(local, "rb") as f:
         data = f.read()
     ftp = ftplib.FTP()
@@ -174,6 +180,9 @@ def deploy_cold(host, local):
     ftp.storbinary("STOR " + remote, io.BytesIO(data))
     ftp.quit()
     print("OK ftp", remote[1:], len(data))
+    if not companion:
+        print("OK uploaded through VitaShell: open Spotivita on the Vita")
+        return 0
     print(vc(host, "launch " + TITLE_ID) or "OK launch")
     ok = wait_ready(host, 40)
     print("OK relaunched" if ok else "ERR app did not come back")
@@ -192,8 +201,8 @@ def run(host, argv):
         r = vc(host, " ".join(argv[1:]))
         print(r or "OK")
         return 1 if r.lower().startswith(("err", "unknown", "invalid")) else 0
-    if cmd == "deploy" and not answers(host) and listens(host):
-        return deploy_cold(host, argv[1])
+    if cmd == "deploy" and listens(host, FTP_PORT):
+        return deploy_ftp(host, argv[1])
     link = Link(host)
     if cmd == "state":
         r = link.text("state")
@@ -230,6 +239,9 @@ def run(host, argv):
             data = f.read()
         r, _ = link.blob("put %s %d" % (remote, len(data)), data)
         print(r)
+        if cmd == "deploy" and not r.startswith("OK"):
+            print("A running app cannot write its own ux0:app folder on hardware. Reboot the Vita "
+                  "so vitacompanion loads, or open VitaShell and press SELECT (FTP), then retry.")
         if cmd == "put" or not r.startswith("OK"):
             return 0 if r.startswith("OK") else 1
         print(link.text("relaunch"))
