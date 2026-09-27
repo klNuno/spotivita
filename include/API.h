@@ -5,13 +5,15 @@
 #include <functional>
 #include <mutex>  // NOLINT
 #include <string>
+#include <vector>
 
 #define SPOTIFY_PLAYLIST_HEADER            "spotify:playlist:"
 #define SPOTIFY_TRACK_HEADER               "spotify:track:"
 #define SPOTIFY_ROOTLIST_LENGTH            200
-#define SPOTIFY_PLAYLIST_TRACK_LIMIT       500
-#define SPOTIFY_LIKED_PAGE                 100
-#define SPOTIFY_LIKED_LIMIT                500
+// Spotify caps playlists at 10000 tracks; the same bound guards Liked Songs.
+#define SPOTIFY_PLAYLIST_TRACK_LIMIT       10000
+#define SPOTIFY_LIKED_PAGE                 200
+#define SPOTIFY_LIKED_LIMIT                10000
 #define LIKED_SONGS_URI                    "spotify:collection:tracks"
 
 #define SPOTIFY_API_BASE                   "https://api.spotify.com/v1"
@@ -57,11 +59,17 @@ class API {
     ApiResult get_rootlist();
     ApiResult get_playlist(const std::string &playlistId);
     ApiResult get_track_metadata(const std::string &trackId);
+    ApiResult get_tracks_metadata(const std::vector<std::string> &uris);
     // One page of Liked Songs (collection PageResponse protobuf), newest first.
     ApiResult get_liked_page(const std::string &pageToken, int limit);
 
     // pathfinder GraphQL searchTracks, JSON.
     ApiResult search(const std::string &query, uint16_t limit);
+
+    // Any spclient path (devkit exploration): POST when body is set.
+    ApiResult raw(const std::string &path, const std::string *body, const char *contentType) {
+        return spclient(SPCLIENT_BASE + path, nullptr, body, contentType);
+    }
 
  private:
     std::string bearer(bool forceRefresh);

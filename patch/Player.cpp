@@ -120,10 +120,14 @@ void Player::runTask()
             currentTrack->audioStream->audioSink = nullptr;
             currentTrack->audioStream->pcmCallback = nullptr;
 
+            // Deleted outside the lock: the destructor waits for a Mercury
+            // callback on the cspot thread, which may be taking this lock in
+            // cancelCurrentTrack.
             currentTrackMutex.lock();
-            delete currentTrack;
+            SpotifyTrack *finished = currentTrack;
             currentTrack = nullptr;
             currentTrackMutex.unlock();
+            delete finished;
         }
         else
         {
@@ -170,27 +174,40 @@ void Player::handleLoad(std::shared_ptr<TrackReference> trackReference, std::fun
         this->feedPCM(frames, len);
      };
 
+    // The track being replaced is deleted outside nextTrackMutex: its
+    // destructor waits for its Mercury callback, which takes that mutex in
+    // loadedTrackCallback. Skipping fast used to delete it under the callback
+    // (use after free in the audio key callback).
     this->nextTrackMutex.lock();
-    if(this->nextTrack != nullptr)
-    {
-        delete this->nextTrack;
-        this->nextTrack = nullptr;
-    }
+    SpotifyTrack *replaced = this->nextTrack;
+    this->nextTrack = nullptr;
+    this->nextTrackMutex.unlock();
+    delete replaced;
 
-    this->nextTrack = new SpotifyTrack(this->manager, trackReference, position_ms, isPaused);
-
-    this->nextTrack->trackInfoReceived = this->trackChanged;
-    this->nextTrack->loadedTrackCallback = [this, framesCallback, trackLoadedCallback]() {
+    SpotifyTrack *track = new SpotifyTrack(this->manager, trackReference, position_ms, isPaused);
+    track->trackInfoReceived = this->trackChanged;
+    track->loadedTrackCallback = [this, framesCallback, trackLoadedCallback, track]() {
+        this->nextTrackMutex.lock();
+        bool current = this->nextTrack == track;   // not replaced while its key was on the way
+        this->nextTrackMutex.unlock();
+        if (!current) return;
         trackLoadedCallback();
 
         this->nextTrackMutex.lock();
-        this->nextTrack->audioStream->streamFinishedCallback = this->endOfFileCallback;
-        this->nextTrack->audioStream->audioSink = this->audioSink;
-        this->nextTrack->audioStream->pcmCallback = framesCallback;
-        this->nextTrack->loaded = true;
+        current = this->nextTrack == track;
+        if (current)
+        {
+            track->audioStream->streamFinishedCallback = this->endOfFileCallback;
+            track->audioStream->audioSink = this->audioSink;
+            track->audioStream->pcmCallback = framesCallback;
+            track->loaded = true;
+        }
         this->nextTrackMutex.unlock();
+        if (!current) return;
 
         cancelCurrentTrack();
     };
+    this->nextTrackMutex.lock();
+    this->nextTrack = track;
     this->nextTrackMutex.unlock();
 }

@@ -15,7 +15,11 @@ SpircController::SpircController(std::shared_ptr<MercuryManager> manager,
 
     player->endOfFileCallback = [=]() {
         // nextTrack() wraps to index 0 and pauses at the end of the queue.
-        if (state->nextTrack() || repeatQueue) {
+        if (state->nextTrack()) {
+            loadTrack();
+        } else if (queueContinues) {
+            queueEnded();   // the app sends the next part of a long list
+        } else if (repeatQueue) {
             loadTrack();
         }
     };
@@ -43,6 +47,7 @@ void SpircController::subscribe() {
 }
 
 void SpircController::setPause(bool isPaused, bool notifyPlayer) {
+    if (loading) pausedWhileLoading = isPaused;
     sendEvent(CSpotEventType::PLAY_PAUSE, isPaused);
     if (isPaused) {
         CSPOT_LOG(debug, "External pause command");
@@ -65,11 +70,9 @@ void SpircController::disconnect(void) {
 }
 
 void SpircController::playToggle() {
-    if (state->innerFrame.state.status == PlayStatus_kPlayStatusPause) {
-        setPause(false);
-    } else {
-        setPause(true);
-    }
+    bool paused = loading ? pausedWhileLoading.load()
+                          : state->innerFrame.state.status == PlayStatus_kPlayStatusPause;
+    setPause(!paused);
 }
 
 void SpircController::adjustVolume(int by) {
@@ -102,7 +105,11 @@ void SpircController::skipTo() {
 
 void SpircController::nextSong() {
     skipTo();
-    if (state->nextTrack() || repeatQueue) {
+    if (state->nextTrack()) {
+        loadTrack();
+    } else if (queueContinues) {
+        queueEnded();
+    } else if (repeatQueue) {
         loadTrack();
     }
     notify();
@@ -161,6 +168,7 @@ void SpircController::handleFrame(std::vector<uint8_t> &data) {
 
         state->setActive(true);
         skipTo();
+        queueContinues = false;   // a phone's queue, not the app's long list
 
         // Every sane person on the planet would expect std::move to work here.
         // And it does... on every single platform EXCEPT for ESP32 for some
@@ -224,7 +232,9 @@ static std::vector<uint8_t> trackGid(const std::string &uri) {
 }
 
 void SpircController::playTracks(const std::vector<std::string> &uris,
-                                 const std::string &contextUri, uint32_t index) {
+                                 const std::string &contextUri, uint32_t index,
+                                 bool continues) {
+    queueContinues = continues;
     std::vector<std::pair<std::string, std::vector<uint8_t>>> tracks;
     uint32_t start = 0;
     for (size_t i = 0; i < uris.size(); i++) {
@@ -290,9 +300,14 @@ void SpircController::setRepeat(int mode) {
 void SpircController::loadTrack(uint32_t position_ms, bool isPaused) {
     sendEvent(CSpotEventType::LOAD, (int) position_ms);
     state->setPlaybackState(PlaybackState::Loading);
+    pausedWhileLoading = false;
+    loading = true;
     std::function<void()> loadedLambda = [=]() {
-        // Loading finished, notify that playback started
-        setPause(isPaused, false);
+        // Loading finished, notify that playback started. A pause asked while
+        // it loaded (a tap, the sleep timer) holds.
+        bool paused = isPaused || pausedWhileLoading;
+        loading = false;
+        setPause(paused, false);
         sendEvent(CSpotEventType::PLAYBACK_START);
     };
 

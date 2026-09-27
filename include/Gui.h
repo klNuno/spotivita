@@ -52,10 +52,13 @@ class GUI {
     std::function<void()> nextCallback = []() {};
     std::function<void()> prevCallback = []() {};
     std::function<void()> playToggleCallback = []() {};
+    std::function<void()> pauseCallback = []() {};
     std::function<void(int)> volumeCallback = [](int) {};  // 0..65535
-    // Local playback: track URIs, context URI, start index.
-    std::function<void(const std::vector<std::string>&, const std::string&, uint32_t)>
-        playTracksCallback = [](const std::vector<std::string>&, const std::string&, uint32_t) {};
+    // Local playback: track URIs, context URI, start index, and whether the
+    // list goes on past these tracks (cspot then sets queueEnded at their end).
+    std::function<void(const std::vector<std::string>&, const std::string&, uint32_t, bool)>
+        playTracksCallback = [](const std::vector<std::string>&, const std::string&, uint32_t, bool) {};
+    std::atomic<bool> queueEnded{false};
     std::function<void(int)> seekCallback = [](int) {};       // ms
     std::function<void(bool)> shuffleCallback = [](bool) {};
     std::function<void(int)> repeatCallback = [](int) {};    // 0 off, 1 all, 2 one

@@ -24,6 +24,10 @@ void new_frame(bool acceptInput);
 // inertia and right-stick scrolling to it.
 void scroll_area();
 
+// Stops the finger from scrolling the list it went down in, and any inertia
+// (a control that follows the finger itself, like a fast-scroll thumb).
+void cancel_scroll();
+
 // Something still needs frames (inertia, injected script in progress).
 bool animating();
 

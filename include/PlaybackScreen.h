@@ -3,7 +3,10 @@
 #include <imgui_vita2d/imgui.h>
 #include "Render.h"
 #include <atomic>
+#include <cstdint>
+#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 #include "Screen.h"
 #include "PlayerModel.h"
@@ -13,16 +16,27 @@ enum class LoadState { NONE, LOADING, LOADED, FAILED };
 struct TrackRow {
     std::string name;     // "" until metadata arrives
     std::string artist;
+    std::string album;
     std::string uri;      // spotify:track:<id>
-    uint32_t position;    // index inside the playlist, the start of a local queue
+    uint32_t position = 0;  // index inside the playlist (custom order)
+    int durationMs = 0;
+    int64_t addedMs = 0;  // when it joined the playlist, 0 if unknown
 };
+
+// Track orders of the sort menu, in menu order.
+enum TrackSort { SORT_CUSTOM, SORT_TITLE, SORT_ARTIST, SORT_ALBUM, SORT_ADDED, SORT_DURATION,
+                 SORT_COUNT };
 
 struct Playlist {
     std::string name;
     std::string uri;      // spotify:playlist:<id>, or LIKED_SONGS_URI
     int folder = -1;      // index into folders, -1 = library root
+    int length = 0;       // track count from the rootlist, 0 if unknown
     std::vector<TrackRow> tracks;
     LoadState tracksState = LoadState::NONE;
+    bool fresh = false;   // track list fetched from Spotify this run
+    int sort = SORT_CUSTOM;
+    bool sortDesc = false;
 };
 
 // A folder of the Spotify library: the rootlist brackets its playlists with
@@ -58,6 +72,9 @@ class PlaybackScreen: public Screen {
     // Called by the GUI loop between frames: starts a cover fetch when the
     // track changed.
     void tick();
+    // The part of tick() that also runs while the app is in the background:
+    // the next part of a long queue, the sleep timer.
+    void tickPlayback();
 
  private:
     enum class Tab { LIBRARY, SEARCH, LOG, SETTINGS };
@@ -71,7 +88,10 @@ class PlaybackScreen: public Screen {
     void drawLog(float avail);
     bool drawBackHeader(const std::string &title, float avail);
     void drawSettings(float avail);
+    void drawSleepTimer(float avail);
     void drawNav();
+    void drawPlaylistActions(Playlist &pl, const PlayerModel::Snapshot& snap, float avail);
+    void drawFastScroll(const Playlist &pl, float y0, float step);
 
     // Previous restarts the track past its first seconds, like Spotify.
     void previous(const PlayerModel::Snapshot& snap);
@@ -88,8 +108,19 @@ class PlaybackScreen: public Screen {
     void cancelTrackLoads();
     void startSearch(const std::string& query);
     void fetchCover(const std::string& url);
-    void playContext(const std::string& uri, uint32_t offset);
     void playTrack(const std::string& uri);
+
+    // Open playlist: view = its rows after filter and sort.
+    void buildView();
+    void setSort(int mode);
+    // Plays the view from row (SIZE_MAX: first row, or a random one when
+    // shuffling). Shuffle plays the whole list in random order.
+    void playView(size_t row, bool shuffle);
+    // Plays queueUris[start] from a window of QUEUE_MAX tracks around it; the
+    // rest follows through continueQueue().
+    void sendWindow(size_t start);
+    void continueQueue();
+    void locateCurrent(const PlayerModel::Snapshot& snap);
     void sendSeek(int ms);
     void sendShuffle(bool on);
     void sendRepeat(int mode);
@@ -115,6 +146,35 @@ class PlaybackScreen: public Screen {
     // the live one before each request and before delivering.
     std::atomic<int> libraryGen{0};
     std::atomic<int> tracksGen{0};
+
+    // Open playlist view (indices into its tracks) and what it was built from.
+    std::vector<uint32_t> view;
+    int viewOf = -1;
+    bool viewDirty = true;
+    int viewMissing = 0;           // rows still without a title
+    int64_t viewTotalMs = 0;
+    std::string filter;            // matched on title, artist and album
+    int scrollToRow = -1;          // view row to center on the next frame
+    bool fastScroll = false;       // the open list shows the fast-scroll thumb
+    float thumbGrab = 0.0f;        // finger offset inside the thumb
+    bool sortMenuOpen = false;     // circle closes the menu, not the playlist
+    float lastScrollY = 0.0f;      // of the open list, for the debug state
+
+    // Sort choices per playlist URI, saved in ux0:data/cspot/sorts.json.
+    std::map<std::string, std::pair<int, bool>> sortPrefs;
+
+    // The list playing, in play order. cspot holds a window of it; the rest
+    // is sent as each window ends.
+    std::string queueContext;
+    std::vector<std::string> queueUris;
+    size_t queueNext = 0;          // first index not sent to cspot yet
+    unsigned int shuffleSeed = 1;  // rand_r state: cspot's thread uses rand()
+
+    // Sleep timer: pause at sleepAtUs (process time), or when the track
+    // named sleepTrack ends.
+    uint64_t sleepAtUs = 0;
+    bool sleepEndOfTrack = false;
+    std::string sleepTrack;
 
     // Search
     std::string searchQuery;

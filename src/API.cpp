@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string>
 #include <utility>
+#include <vector>
 
 // Percent-encode a query string for safe use in a URL (RFC 3986 unreserved set).
 static std::string urlencode(const std::string& s) {
@@ -219,6 +220,25 @@ ApiResult API::get_liked_page(const std::string &pageToken, int limit) {
 // One playlist (protobuf): attributes carry the name, contents the item URIs.
 ApiResult API::get_playlist(const std::string &playlistId) {
     return spclient(SPCLIENT_BASE "/playlist/v2/playlist/" + playlistId);
+}
+
+// Many tracks in one request, the way the official clients load a list:
+// extended-metadata BatchedEntityRequest { entity_request=2 { entity_uri=1,
+// query=2 { extension_kind=1: TRACK_V4 = 10 } } }. The answer carries one
+// metadata Track per URI, in any order.
+ApiResult API::get_tracks_metadata(const std::vector<std::string> &uris) {
+    std::string body;
+    for (const auto &uri : uris) {
+        std::string query;
+        pbPutVarint(&query, (1 << 3) | 0);
+        pbPutVarint(&query, 10);
+        std::string request;
+        pbPutString(&request, 1, uri);
+        pbPutString(&request, 2, query);
+        pbPutString(&body, 2, request);
+    }
+    const char *type = "application/protobuf";
+    return spclient(SPCLIENT_BASE "/extended-metadata/v0/extended-metadata", type, &body, type);
 }
 
 // Track metadata (protobuf Track: name=2, album=3, artist=4, duration=7).

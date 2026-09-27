@@ -48,6 +48,7 @@ float g_velocity = 0.0f;
 ImGuiID g_inertiaOwner = 0;
 float g_inertia = 0.0f;
 float g_stickY = 0.0f;
+int g_stickHold = 0;           // frames the right stick has been held
 
 Frame sampleHardware() {
     Frame f;
@@ -182,6 +183,7 @@ void new_frame(bool acceptInput) {
     if (ly < 0) io.NavInputs[ImGuiNavInput_LStickUp] = -ly;
     if (ly > 0) io.NavInputs[ImGuiNavInput_LStickDown] = ly;
     g_stickY = stickAxis(f.ry);
+    g_stickHold = g_stickY != 0.0f ? g_stickHold + 1 : 0;
 
     g_prev = f;
 
@@ -208,10 +210,19 @@ void scroll_area() {
         g_inertia *= INERTIA_DECAY;
     }
     if (g_stickY != 0.0f) {
-        // Right stick scrolls the list regardless of the pointer.
-        float next = y + g_stickY * 14.0f;
+        // Right stick scrolls the list regardless of the pointer, up to 8x
+        // faster after it has been held for a couple of seconds.
+        float boost = 1.0f + static_cast<float>(g_stickHold < 140 ? g_stickHold : 140) / 20.0f;
+        float next = y + g_stickY * 14.0f * boost;
         ImGui::SetScrollY(next < 0.0f ? 0.0f : (next > maxY ? maxY : next));
     }
+}
+
+void cancel_scroll() {
+    g_owner = 0;
+    g_scrolling = false;
+    g_inertia = 0.0f;
+    g_inertiaOwner = 0;
 }
 
 bool animating() {

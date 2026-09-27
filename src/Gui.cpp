@@ -143,6 +143,12 @@ void GUI::init() {
         0xf004, 0xf004,  // heart (Liked Songs)
         0xf07b, 0xf07b,  // folder
         0xf026, 0xf028,  // volume off/down/up
+        0xf002, 0xf002,  // search (playlist filter)
+        0xf05b, 0xf05b,  // crosshairs (locate the song playing)
+        0xf062, 0xf063,  // arrow up/down (sort direction)
+        0xf074, 0xf074,  // random (shuffle play)
+        0xf160, 0xf161,  // sort amount down/up
+        0xf186, 0xf186,  // moon (sleep timer)
         0,
     };
     small_icon_font = io.Fonts->AddFontFromFileTTF(FONT_ICON_FILE_NAME_FAS, 24.0f, NULL, small_ranges);
@@ -234,7 +240,9 @@ void GUI::start() {
 
         // Backgrounded: the system owns the display. Idle WITHOUT an open ImGui
         // frame so we never hold the GPU mid-frame (that wedges SceGxm).
+        // The next part of a long queue and the sleep timer still run.
         if (paused) {
+            static_cast<PlaybackScreen*>(playback_screen)->tickPlayback();
             sceKernelDelayThread(100000);
             continue;
         }

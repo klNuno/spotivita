@@ -262,6 +262,25 @@ def run(host, argv):
             f.write(data)
         print("OK", out, len(data))
         return 0
+    if cmd == "spclient":
+        # spclient PATH OUT [CTYPE BODYFILE]: the app's token on spclient + PATH.
+        body = b""
+        head = "spclient " + argv[1]
+        if len(argv) > 4:
+            with open(argv[4], "rb") as f:
+                body = f.read()
+            head += " %s %d" % (argv[3], len(body))
+        link.sock.sendall((head + "\n").encode("utf-8") + body)
+        r = link._line()
+        if not r.startswith("OK "):
+            print(r)
+            return 1
+        data = link._exact(int(r[3:]))
+        status, _, payload = data.partition(b"\n")
+        with open(argv[2], "wb") as f:
+            f.write(payload)
+        print("OK", status.decode(), len(payload), argv[2])
+        return 0 if status.startswith(b"2") else 1
     if cmd in ("put", "deploy"):
         local = argv[1]
         remote = argv[2] if cmd == "put" else "ux0:app/%s/eboot.bin" % TITLE_ID

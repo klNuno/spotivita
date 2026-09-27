@@ -230,15 +230,19 @@ int start_cspot(SceSize _args, void *_argp) {
         gui->playToggleCallback = []() {
             queue_cspot([] { spircController->playToggle(); });
         };
+        gui->pauseCallback = []() {
+            queue_cspot([] { spircController->setPause(true); });
+        };
         gui->volumeCallback = [](int v) {
             queue_cspot([v] { spircController->setVolume(v); });
         };
         gui->playTracksCallback = [](const std::vector<std::string> &uris,
-                                     const std::string &context, uint32_t index) {
-            queue_cspot([uris, context, index] {
-                spircController->playTracks(uris, context, index);
+                                     const std::string &context, uint32_t index, bool continues) {
+            queue_cspot([uris, context, index, continues] {
+                spircController->playTracks(uris, context, index, continues);
             });
         };
+        spircController->queueEnded = [gui]() { gui->queueEnded = true; };
         gui->seekCallback = [](int ms) {
             queue_cspot([ms] { spircController->seek(static_cast<uint32_t>(ms)); });
         };

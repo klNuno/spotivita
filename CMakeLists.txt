@@ -83,6 +83,12 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/ShannonConnection.cpp
 # guards reconnectedCallback so a reconnect never crashes the process.
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/MercuryManager.cpp
      DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/src)
+# Mercury callbacks run on the cspot thread while the player thread deletes a
+# finished track, which unregisters them: the header adds the mutex both take,
+# and an owner so a track only clears its own audio key callback. Skipping fast
+# crashed in the audio key callback of a deleted track.
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/MercuryManager.h
+     DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/include)
 # Local playback (playTracks, seek, shuffle, repeat): the Web API player
 # endpoints answer 429 to tokens minted for this client, so the Vita builds its
 # own queue instead of asking Spotify's servers to start playback.

@@ -19,6 +19,16 @@ network layer.
 - Your library as Spotify shows it: Liked Songs first, then your playlists
   and folders, in your order. It shows at once from a cache and refreshes in
   the background at each launch.
+- Big playlists load whole. A 3800-song playlist shows every title in about
+  3 seconds, then opens at once from a cache. Each one shows its song count
+  and total length.
+- Sort a playlist by title, artist, album, date added or duration, in either
+  direction. Each playlist remembers its sort. A filter narrows it to the
+  songs whose title, artist or album match.
+- Shuffle play, a fast-scroll thumb that shows the letter, date or position
+  under your finger, a button that scrolls to the song playing, and a right
+  stick that speeds up the longer you hold it.
+- A sleep timer: 15 minutes, 30 minutes, 1 hour or the end of the song.
 - Track search.
 - Play, pause, next, previous, seek on the progress bar, shuffle, repeat and
   volume, all handled on the Vita. Pause cuts the sound at once. Previous

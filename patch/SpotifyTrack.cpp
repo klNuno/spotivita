@@ -33,8 +33,10 @@ SpotifyTrack::SpotifyTrack(std::shared_ptr<MercuryManager> manager, std::shared_
 
 SpotifyTrack::~SpotifyTrack()
 {
+    // Both wait for a callback of this track running on the cspot thread,
+    // and only drop what this track registered.
     this->manager->unregisterMercuryCallback(this->reqSeqNum);
-    this->manager->freeAudioKeyCallback();
+    this->manager->freeAudioKeyCallback(this);
     pb_release(Track_fields, &this->trackInfo);
     pb_release(Episode_fields, &this->episodeInfo);
 }
@@ -240,5 +242,5 @@ void SpotifyTrack::requestAudioKey(std::vector<uint8_t> fileId, std::vector<uint
         }
     };
 
-    this->manager->requestAudioKey(trackId, fileId, audioKeyLambda);
+    this->manager->requestAudioKey(trackId, fileId, audioKeyLambda, this);
 }

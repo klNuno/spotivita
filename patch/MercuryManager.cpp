@@ -55,6 +55,7 @@ bool MercuryManager::timeoutHandler()
 
 void MercuryManager::unregisterMercuryCallback(uint64_t seqId)
 {
+    std::lock_guard<std::recursive_mutex> callbackGuard(callbackMutex);
     auto element = this->callbacks.find(seqId);
     if (element != this->callbacks.end())
     {
@@ -62,11 +63,13 @@ void MercuryManager::unregisterMercuryCallback(uint64_t seqId)
     }
 }
 
-void MercuryManager::requestAudioKey(std::vector<uint8_t> trackId, std::vector<uint8_t> fileId, audioKeyCallback& audioCallback)
+void MercuryManager::requestAudioKey(std::vector<uint8_t> trackId, std::vector<uint8_t> fileId, audioKeyCallback& audioCallback, const void *owner)
 {
+    std::lock_guard<std::recursive_mutex> callbackGuard(callbackMutex);
     std::lock_guard<std::mutex> guard(reconnectionMutex);
     auto buffer = fileId;
     this->keyCallback = audioCallback;
+    this->keyCallbackOwner = owner;
     // Structure: [FILEID] [TRACKID] [4 BYTES SEQUENCE ID] [0x00, 0x00]
     buffer.insert(buffer.end(), trackId.begin(), trackId.end());
     auto audioKeySequence = pack<uint32_t>(htonl(this->audioKeySequence));
@@ -82,9 +85,16 @@ void MercuryManager::requestAudioKey(std::vector<uint8_t> trackId, std::vector<u
     this->session->shanConn->sendPacket(static_cast<uint8_t>(MercuryType::AUDIO_KEY_REQUEST_COMMAND), buffer);
 }
 
-void MercuryManager::freeAudioKeyCallback()
+// A finished track is deleted after the next one may already have asked for
+// its key: clearing unconditionally dropped that request, and the skip stalled.
+void MercuryManager::freeAudioKeyCallback(const void *owner)
 {
-    this->keyCallback = nullptr;
+    std::lock_guard<std::recursive_mutex> callbackGuard(callbackMutex);
+    if (owner == nullptr || owner == this->keyCallbackOwner)
+    {
+        this->keyCallback = nullptr;
+        this->keyCallbackOwner = nullptr;
+    }
 }
 
 std::shared_ptr<AudioChunk> MercuryManager::fetchAudioChunk(std::vector<uint8_t> fileId, std::vector<uint8_t>& audioKey, uint16_t index)
@@ -237,10 +247,14 @@ void MercuryManager::updateQueue() {
 
                 // First four bytes mark the sequence id
                 auto seqId = ntohl(extract<uint32_t>(packet->data, 0));
+                std::lock_guard<std::recursive_mutex> callbackGuard(callbackMutex);
                 if (seqId == (this->audioKeySequence - 1) && this->keyCallback != nullptr)
                 {
                     auto success = static_cast<MercuryType>(packet->command) == MercuryType::AUDIO_KEY_SUCCESS_RESPONSE;
-                    this->keyCallback(success, packet->data);
+                    // A copy: the callback may request another key, which
+                    // replaces keyCallback while it runs.
+                    audioKeyCallback callback = this->keyCallback;
+                    callback(success, packet->data);
                 }
                 break;
             }
@@ -260,11 +274,13 @@ void MercuryManager::updateQueue() {
                 {
                     CSPOT_LOG(debug, " MercuryType::UNSUB response->parts[0].size() = %d", response->parts[0].size());
                 }
-                if (this->callbacks.count(response->sequenceId) > 0)
+                std::lock_guard<std::recursive_mutex> callbackGuard(callbackMutex);
+                auto element = this->callbacks.find(response->sequenceId);
+                if (element != this->callbacks.end())
                 {
-                    auto seqId = response->sequenceId;
-                    this->callbacks[response->sequenceId](std::move(response));
-                    this->callbacks.erase(this->callbacks.find(seqId));
+                    mercuryCallback callback = std::move(element->second);
+                    this->callbacks.erase(element);
+                    callback(std::move(response));
                 }
                 break;
             }
@@ -300,6 +316,7 @@ void MercuryManager::handleQueue()
 uint64_t MercuryManager::execute(MercuryType method, std::string uri, mercuryCallback& callback, mercuryCallback& subscription, mercuryParts& payload)
 {
     if (!isRunning) return -1;
+    std::lock_guard<std::recursive_mutex> callbackGuard(callbackMutex);
     std::lock_guard<std::mutex> guard(reconnectionMutex);
     // Construct mercury header
 

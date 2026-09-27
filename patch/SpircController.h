@@ -14,6 +14,7 @@
 #include "ConfigJSON.h"
 #include <cassert>
 #include <variant>
+#include <atomic>
 
 enum class CSpotEventType {
     PLAY_PAUSE,
@@ -40,6 +41,11 @@ private:
     std::string username;
     bool firstFrame = true;
     bool repeatQueue = false;
+    bool queueContinues = false;   // the app has more of the list after this queue
+    // PlayerState reports "paused" for every loading track, so a toggle during a
+    // load reads these instead, and a pause asked then holds once it loads.
+    std::atomic<bool> loading{false};
+    std::atomic<bool> pausedWhileLoading{false};
     std::unique_ptr<Player> player;
     std::unique_ptr<PlayerState> state;
     std::shared_ptr<AudioSink> audioSink;
@@ -60,6 +66,13 @@ public:
      * the old audio until the buffer drained.
      */
     std::function<void()> flushAudio = []() {};
+
+    /**
+     * @brief Runs on the cspot thread when a queue from playTracks(..., true)
+     * runs out (end of its last track, or next on it): the app then sends the
+     * next part of its list. Repeat-all does not wrap such a queue.
+     */
+    std::function<void()> queueEnded = []() {};
 
     SpircController(std::shared_ptr<MercuryManager> manager, std::string username, std::shared_ptr<AudioSink> audioSink);
     ~SpircController();
@@ -120,7 +133,8 @@ public:
      * @param contextUri playlist URI shown to other clients, may be empty
      * @param index position in `uris` to start from
      */
-    void playTracks(const std::vector<std::string> &uris, const std::string &contextUri, uint32_t index);
+    void playTracks(const std::vector<std::string> &uris, const std::string &contextUri, uint32_t index,
+                    bool continues = false);
 
     /**
      * @brief Seeks the current track and notifies spotify SPIRC

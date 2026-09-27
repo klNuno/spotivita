@@ -273,6 +273,45 @@ void serve(int fd) {
             sendText(fd, "OK\n");
             flush_logger();
             sceAppMgrLoadExec("app0:eboot.bin", NULL, NULL);
+        } else if (cmd == "spclient") {
+            // spclient <path> [<content-type> <len>]: the app's own token on
+            // SPCLIENT_BASE + path, run on the network worker (the curl handle
+            // is not shared across threads). The body follows the line; the
+            // raw response comes back as a blob with the status in front.
+            std::string path, ctype;
+            size_t len = 0;
+            in >> path >> ctype >> len;
+            std::string body;
+            if (len > 0 && len <= 1024 * 1024) {
+                body.resize(len);
+                if (!recvAll(fd, &body[0], len)) break;
+            }
+            if (path.empty() || path[0] != '/') {
+                sendText(fd, "ERR path must start with /\n");
+                continue;
+            }
+            auto res = std::make_shared<ApiResult>();
+            auto done = std::make_shared<bool>(false);
+            g_gui->net.post([path, ctype, body, res, done] {
+                // "{user}" stands for the signed-in username.
+                std::string p = path;
+                size_t at = p.find("{user}");
+                if (at != std::string::npos) p.replace(at, 6, g_gui->api.user());
+                ApiResult r = g_gui->api.raw(p, body.empty() ? nullptr : &body,
+                                             ctype.empty() ? nullptr : ctype.c_str());
+                std::lock_guard<std::mutex> lk(g_mutex);
+                *res = r;
+                *done = true;
+                g_cv.notify_all();
+            }, true);
+            std::unique_lock<std::mutex> lk(g_mutex);
+            if (!g_cv.wait_for(lk, std::chrono::seconds(60), [&] { return *done; })) {
+                sendText(fd, "ERR timeout\n");
+                continue;
+            }
+            std::string blob = std::to_string(res->status) + "\n" + res->body;
+            lk.unlock();
+            sendBlob(fd, blob);
         } else if (cmd == "quit") {
             sendText(fd, "OK\n");
             g_gui->isRunning = false;
