@@ -3,8 +3,8 @@ cmake_minimum_required(VERSION 3.10)
 set(VITA_APP_NAME "Spotivita")
 # Own TITLEID so Spotivita installs alongside the old CSpot (CSPOT0021), not over it.
 set(VITA_TITLEID  "SPOTIVITA")
-# param.sfo APP_VER, XX.YY: 00.10 is release 0.1.0.
-set(VITA_VERSION  "00.10")
+# param.sfo APP_VER, XX.YY: 00.11 is release 0.1.1.
+set(VITA_VERSION  "00.11")
 
 if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
   if(DEFINED ENV{VITASDK})

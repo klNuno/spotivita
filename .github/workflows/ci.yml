@@ -63,8 +63,8 @@ jobs:
         name: spotivita-vpk
         path: build/spotivita.vpk
 
-  # A v* tag publishes a release with the VPK built above. The notes are the
-  # annotated tag's message.
+  # A v* tag publishes a release with the VPK built above. The notes list the
+  # commits since the previous v* tag (tools/release_notes.py).
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [lint, build]
@@ -73,13 +73,21 @@ jobs:
       contents: write
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
-    # checkout leaves a lightweight copy of the tag: fetch the annotated one.
-    - name: Release notes from the tag
+    # param.sfo APP_VER is XX.YY: v0.1.1 needs VITA_VERSION "00.11".
+    - name: Version in CMakeLists.txt matches the tag
       run: |
-        git fetch --force origin "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
-        git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.md
-        test -s notes.md
+        IFS=. read -r major minor patch <<< "${GITHUB_REF_NAME#v}"
+        want=$(printf '%02d.%d%d' "$major" "$minor" "$patch")
+        grep -q "set(VITA_VERSION  \"$want\")" CMakeLists.txt || {
+          echo "::error::tag $GITHUB_REF_NAME needs VITA_VERSION \"$want\" in CMakeLists.txt"
+          exit 1
+        }
+
+    - name: List commits since the previous release
+      run: python3 tools/release_notes.py | tee notes.md
 
     - uses: actions/download-artifact@v4
       with:

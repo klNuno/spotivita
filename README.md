@@ -145,8 +145,8 @@ cmake -B build && cmake --build build
 The VPK lands in `build/spotivita.vpk`. `.github/workflows/ci.yml` builds it in
 the `vitasdk/vitasdk` Docker image. That image installs OpenSSL 1.1.1 while its
 libcurl expects 1.0.2, so the workflow swaps the package back first. Pushing a
-`v*` tag also publishes a release with the VPK, its notes taken from the
-annotated tag's message.
+`v*` tag also publishes a release with the VPK, its notes listing the commits
+since the previous tag.
 
 ## Testing without the console in your hands
 
