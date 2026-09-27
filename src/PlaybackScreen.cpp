@@ -1486,8 +1486,9 @@ bool PlaybackScreen::goBack() {
 }
 
 // Fixed layout for the 512 px the pane has: cover, title, artist, scrubber,
-// transport, volume. Every block sits at a set height so nothing gets pushed
-// off the bottom by a long title or a bigger font.
+// transport. Every block sits at a set height so nothing gets pushed off the
+// bottom by a long title or a bigger font. No volume bar: the console's
+// buttons set the volume.
 void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
     float paneW = ImGui::GetContentRegionAvail().x;
     float coverSz = paneW - 120.0f;
@@ -1606,38 +1607,6 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
 
     ImGui::SetCursorPosY(y);
     drawTransport(snap);
-    y += 82.0f;
-
-    // Volume (committed to cspot on release).
-    float volFrac = snap.volume / 65535.0f;
-    if (volSliding) volFrac = volSlideFrac;
-    const char *volIcon = volFrac <= 0.01f ? ICON_FA_VOLUME_OFF
-                        : (volFrac < 0.5f ? ICON_FA_VOLUME_DOWN : ICON_FA_VOLUME_UP);
-    ImGui::SetCursorPos(ImVec2(16.0f, y - 1.0f));
-    ImGui::PushFont(gui->small_icon_font);
-    ImGui::PushStyleColor(ImGuiCol_Text, COL_GREY);
-    ImGui::TextUnformatted(volIcon);
-    ImGui::PopStyleColor();
-    ImGui::PopFont();
-    float volHeld = 0.0f;
-    ImGui::SetCursorPos(ImVec2(52.0f, y));
-    bool volNow = barControl("vol", volFrac, ImVec2(barW - 36.0f, 22.0f), COL_GREENV, false, &volHeld);
-    if (volNow) {
-        volSliding = true;
-        volSlideFrac = volHeld;
-    } else if (volSliding) {
-        volSliding = false;
-        int v = static_cast<int>(volSlideFrac * 65535.0f);
-        if (remoteMode) {
-            remote.volume = v;
-            std::string target = remote.activeId;
-            GUI *g = gui;
-            gui->net.post([g, target, v] { g->connect.setVolume(target, v); }, true);
-        } else {
-            gui->player.setVolume(v);   // instant local feedback
-            gui->volumeCallback(v);
-        }
-    }
 
     if (remoteMode) drawRemoteBar(paneW);
 }

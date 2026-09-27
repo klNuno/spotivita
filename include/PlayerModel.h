@@ -105,5 +105,5 @@ class PlayerModel {
     uint64_t anchorAtUs_ = 0;
     bool paused_ = true;
     bool loading_ = false;
-    std::atomic<int> volume_{32767};
+    std::atomic<int> volume_{65535};   // the app always starts at full (main.cpp)
 };

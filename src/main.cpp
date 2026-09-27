@@ -61,7 +61,7 @@ static int watch_id;
 static int cspot_id;
 static int zeroconf_id;
 
-// Player commands from the GUI (play/pause, next, prev, volume). SpircController
+// Player commands from the GUI (play/pause, next, prev, seek). SpircController
 // is not thread-safe and the cspot thread drives it through updateQueue, so the
 // GUI queues closures here and the cspot thread runs them between updates.
 static std::mutex cspot_cmd_mutex;
@@ -275,9 +275,6 @@ int start_cspot(SceSize _args, void *_argp) {
         gui->yieldCallback = []() {
             queue_cspot([] { spircController->yieldPlayback(); });
         };
-        gui->volumeCallback = [](int v) {
-            queue_cspot([v] { spircController->setVolume(v); });
-        };
         gui->playTracksCallback = [](const std::vector<std::string> &uris,
                                      const std::string &context, uint32_t index, bool continues) {
             queue_cspot([uris, context, index, continues] {
@@ -441,6 +438,10 @@ int main(void) {
     }
 
     configMan->deviceName = DEVICE_NAME;
+    // No volume control in the app: play at full and let the console's
+    // buttons set the level. A lower value saved by an older build (or a
+    // phone over Connect) would otherwise stick with no way to raise it here.
+    configMan->volume = UINT16_MAX;
     {
         // cspot defaults to 160 kb/s; ours is 320 until the user picks another
         // quality in Settings, which saves "bitrate".

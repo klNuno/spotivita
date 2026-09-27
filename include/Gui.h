@@ -29,7 +29,7 @@ class GUI {
     ImFont *font_bold = nullptr;
     ImFont *playback_icon_font = nullptr;
     ImFont *icon_font = nullptr;
-    ImFont *small_icon_font = nullptr;   // 24 px: row art, volume
+    ImFont *small_icon_font = nullptr;   // 24 px: row art, device icons
     ImFont *log_font = nullptr;
     Screen *login_screen = nullptr;
     Screen *playback_screen = nullptr;
@@ -60,7 +60,6 @@ class GUI {
     std::function<void()> playToggleCallback = []() {};
     std::function<void()> pauseCallback = []() {};
     std::function<void()> yieldCallback = []() {};    // another device took over
-    std::function<void(int)> volumeCallback = [](int) {};  // 0..65535
     // Local playback: track URIs, context URI, start index, and whether the
     // list goes on past these tracks (cspot then sets queueEnded at their end).
     std::function<void(const std::vector<std::string>&, const std::string&, uint32_t, bool)>

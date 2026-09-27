@@ -326,6 +326,4 @@ class PlaybackScreen: public Screen {
     // Scrubber / volume drag state (commit on release).
     bool scrubbing = false;
     float scrubFrac = 0.0f;
-    bool volSliding = false;
-    float volSlideFrac = 0.0f;
 };

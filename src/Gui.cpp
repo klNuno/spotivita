@@ -142,7 +142,7 @@ void GUI::init() {
         0xf001, 0xf001,  // music (playlist art)
         0xf004, 0xf004,  // heart (Liked Songs)
         0xf07b, 0xf07b,  // folder
-        0xf026, 0xf028,  // volume off/down/up
+        0xf026, 0xf028,  // volume off/down/up (speaker devices)
         0xf002, 0xf002,  // search (playlist filter)
         0xf05b, 0xf05b,  // crosshairs (locate the song playing)
         0xf062, 0xf063,  // arrow up/down (sort direction)

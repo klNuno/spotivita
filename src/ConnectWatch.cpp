@@ -314,13 +314,6 @@ bool ConnectWatch::command(const std::string &targetId, const std::string &endpo
     return r.ok();
 }
 
-bool ConnectWatch::setVolume(const std::string &targetId, int volume) {
-    if (targetId.empty()) return false;
-    ApiResult r = api_->connect_state("PUT", "connect/volume/from/" + hobsId_ + "/to/" + targetId,
-                                      "{\"volume\":" + std::to_string(volume) + "}", "");
-    return r.ok();
-}
-
 bool ConnectWatch::transfer(const std::string &targetId) {
     ConnectState s = snapshot();
     if (s.activeId.empty() || s.activeId == targetId) return false;

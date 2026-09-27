@@ -43,8 +43,6 @@ class ConnectWatch {
     // Asks device targetId to pause, resume, skip_next, skip_prev or seek_to
     // valueMs. Blocking, like the two below: call from the net worker.
     bool command(const std::string &targetId, const std::string &endpoint, int64_t valueMs = -1);
-    // Sets the volume of device targetId (0..65535).
-    bool setVolume(const std::string &targetId, int volume);
     // Moves playback from the active device to targetId, where it continues.
     bool transfer(const std::string &targetId);
     // Replaces the state as if a cluster said so and holds it against real
