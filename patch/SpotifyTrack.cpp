@@ -162,13 +162,14 @@ void SpotifyTrack::trackInformationCallback(std::unique_ptr<MercuryResponse> res
     if (trackInfoReceived != nullptr)
     {
         auto imageId = pbArrayToVector(trackInfo.album.cover_group.image[0].file_id);
+        auto gid = pbArrayToVector(trackInfo.gid);
         TrackInfo simpleTrackInfo = {
             .name = std::string(trackInfo.name),
             .album = std::string(trackInfo.album.name),
             .artist = std::string(trackInfo.artist[0].name),
             .imageUrl = "https://i.scdn.co/image/" + bytesToHexString(imageId),
             .duration = trackInfo.duration,
-
+            .gid = bytesToHexString(gid),
         };
 
         trackInfoReceived(simpleTrackInfo);

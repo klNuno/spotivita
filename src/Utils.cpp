@@ -226,9 +226,14 @@ int download(const char *url, uint8_t **return_buffer, const char *method, std::
 // per request. The per-request fresh-handle path (download) triggered "Could
 // not resolve hostname" under the burst and starved Mercury into a crash.
 static CURL *s_spclient_handle = NULL;
+// The same for images, owned by the image worker thread.
+static CURL *s_image_handle = NULL;
 
-int spclient_get(const char *url, const std::string &bearer, uint8_t **return_buffer, long *status,
-                 const char *accept, const std::string *body, const char *contentType) {
+// One request on the persistent handle in *slot; no Authorization header when
+// bearer is empty.
+static int persistent_request(CURL **slot, const char *url, const std::string &bearer,
+                              uint8_t **return_buffer, long *status, const char *accept,
+                              const std::string *body, const char *contentType) {
     if (status != NULL) {
         *status = 0;
     }
@@ -236,10 +241,10 @@ int spclient_get(const char *url, const std::string &bearer, uint8_t **return_bu
     chunk.memory = (char *) malloc(1);
     chunk.size = 0;
 
-    if (s_spclient_handle == NULL) {
-        s_spclient_handle = curl_easy_init();
+    if (*slot == NULL) {
+        *slot = curl_easy_init();
     }
-    CURL *h = s_spclient_handle;
+    CURL *h = *slot;
     if (h == NULL) {
         free(chunk.memory);
         *return_buffer = NULL;
@@ -264,8 +269,10 @@ int spclient_get(const char *url, const std::string &bearer, uint8_t **return_bu
     curl_easy_setopt(h, CURLOPT_ERRORBUFFER, errbuf);
 
     struct curl_slist *hl = NULL;
-    std::string auth = "Authorization: Bearer " + bearer;
-    hl = curl_slist_append(hl, auth.c_str());
+    if (!bearer.empty()) {
+        std::string auth = "Authorization: Bearer " + bearer;
+        hl = curl_slist_append(hl, auth.c_str());
+    }
     if (accept != NULL) {
         std::string acc = std::string("Accept: ") + accept;
         hl = curl_slist_append(hl, acc.c_str());
@@ -284,7 +291,7 @@ int spclient_get(const char *url, const std::string &bearer, uint8_t **return_bu
     curl_slist_free_all(hl);
 
     if (res != CURLE_OK) {
-        CSPOT_LOG(error, "spclient_get failed: %s (%s)", curl_easy_strerror(res), errbuf);
+        CSPOT_LOG(error, "request failed: %s (%s)", curl_easy_strerror(res), errbuf);
         free(chunk.memory);
         *return_buffer = NULL;
         return 0;
@@ -296,7 +303,7 @@ int spclient_get(const char *url, const std::string &bearer, uint8_t **return_bu
         *status = status_code;
     }
     if (status_code != 200) {
-        CSPOT_LOG(error, "spclient HTTP %ld: %s", status_code, url);
+        CSPOT_LOG(error, "HTTP %ld: %s", status_code, url);
         free(chunk.memory);
         *return_buffer = NULL;
         return 0;
@@ -304,6 +311,16 @@ int spclient_get(const char *url, const std::string &bearer, uint8_t **return_bu
 
     *return_buffer = (uint8_t *) chunk.memory;
     return static_cast<int>(chunk.size);
+}
+
+int spclient_get(const char *url, const std::string &bearer, uint8_t **return_buffer, long *status,
+                 const char *accept, const std::string *body, const char *contentType) {
+    return persistent_request(&s_spclient_handle, url, bearer, return_buffer, status, accept, body,
+                              contentType);
+}
+
+int image_get(const char *url, uint8_t **return_buffer) {
+    return persistent_request(&s_image_handle, url, "", return_buffer, NULL, NULL, NULL, NULL);
 }
 
 bool LoadTextureFromFile(const char* filename, vita2d_texture** out_texture, int* out_width, int* out_height) {

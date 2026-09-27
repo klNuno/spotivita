@@ -149,6 +149,9 @@ void GUI::init() {
         0xf074, 0xf074,  // random (shuffle play)
         0xf160, 0xf161,  // sort amount down/up
         0xf186, 0xf186,  // moon (sleep timer)
+        0xf007, 0xf007,  // user (artist)
+        0xf142, 0xf142,  // ellipsis-v (track menu)
+        0xf51f, 0xf51f,  // compact disc (album)
         // Spotify Connect device types
         0xf108, 0xf109,  // desktop, laptop
         0xf11b, 0xf11b,  // gamepad
@@ -167,6 +170,7 @@ void GUI::init() {
     Input::init();
 
     net.start();
+    images.start();
 
     login_screen = new LoginScreen(this);
     playback_screen = new PlaybackScreen(this);
@@ -257,7 +261,9 @@ void GUI::start() {
         }
 
         // Finished network jobs apply their results here, between frames.
-        bool changed = net.drainResults() || devkit;
+        bool changed = net.drainResults();
+        changed |= images.drainResults();
+        changed |= devkit;
         static_cast<PlaybackScreen*>(playback_screen)->tick();
 
         uint64_t now = sceKernelGetProcessTimeWide();

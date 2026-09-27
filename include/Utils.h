@@ -73,6 +73,8 @@ int download(const char *url, uint8_t **return_buffer, const char *method = "GET
 int spclient_get(const char *url, const std::string &bearer, uint8_t **return_buffer,
                  long *status = nullptr, const char *accept = nullptr,
                  const std::string *body = nullptr, const char *contentType = nullptr);
+// An image over the image worker's own persistent handle (image worker only).
+int image_get(const char *url, uint8_t **return_buffer);
 bool cache_cover_art(std::string url, const uint8_t *buffer, uint32_t length);
 std::string cover_art_path(std::string url);
 bool is_cover_cached(std::string url);

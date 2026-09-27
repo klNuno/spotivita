@@ -6,6 +6,11 @@
 #include "Keyboard.h"
 #include "Utils.h"
 #include "Config.h"
+#include "Catalog.h"
+#include "Proto.h"
+#include "ScreenUtil.h"
+#include "Thumbs.h"
+#include "Widgets.h"
 #include <imgui_vita2d/imgui_internal.h>
 #include <psp2/ctrl.h>
 #include <psp2/io/dirent.h>
@@ -28,18 +33,40 @@
 #include <utility>
 #include <vector>
 
-namespace {
+const char *stateName(LoadState s) {
+    switch (s) {
+        case LoadState::NONE: return "none";
+        case LoadState::LOADING: return "loading";
+        case LoadState::LOADED: return "loaded";
+        case LoadState::FAILED: return "failed";
+    }
+    return "?";
+}
 
-const ImU32 COL_TRACK  = IM_COL32(83, 83, 83, 255);    // #535353
-const ImU32 COL_WHITE  = IM_COL32(255, 255, 255, 255);
-const ImU32 COL_GREENV = IM_COL32(30, 215, 96, 255);   // #1ED760
-const ImU32 COL_GREY   = IM_COL32(179, 179, 179, 255);  // #B3B3B3
-const ImU32 COL_DIM    = IM_COL32(110, 110, 110, 255);
-const ImU32 COL_CLEAR  = IM_COL32(0, 0, 0, 0);
-const ImU32 COL_ROW_HI = IM_COL32(40, 40, 40, 255);
-const ImU32 COL_CARD   = IM_COL32(40, 40, 40, 255);     // #282828
-const ImU32 COL_DARK   = IM_COL32(18, 18, 18, 255);
-const ImU32 COL_LIKED  = IM_COL32(80, 56, 200, 255);    // Liked Songs art
+std::string describeStatus(long status) {
+    switch (status) {
+        case -1:  return "Spotify changed its API. Update Spotivita.";
+        case 0:   return "No connection to Spotify. Check the Wi-Fi.";
+        case 401: return "Spotify session expired. Restart the app.";
+        case 403: return "Spotify refused this action (Premium required).";
+        case 404: return "Spotify could not find this item.";
+        case 429: return "Spotify is rate limiting this app. Try again in a minute.";
+        default:  return "Spotify error " + std::to_string(status) + ".";
+    }
+}
+
+bool startsWith(const std::string &s, const char *prefix) {
+    return s.compare(0, strlen(prefix), prefix) == 0;
+}
+
+int findPlaylist(const std::vector<Playlist> &pls, const std::string &uri) {
+    for (size_t i = 0; i < pls.size(); i++) {
+        if (pls[i].uri == uri) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+namespace {
 
 const char *PLAYLIST_CACHE_PATH = "ux0:data/cspot/playlists.json";
 const char *COVER_CACHE_DIR = "ux0:data/cspot/cache";
@@ -80,36 +107,11 @@ const uint64_t TAKEOVER_GRACE_US = 4000000ULL;
 
 const char *START_GROUP = "spotify:start-group:";
 const char *END_GROUP = "spotify:end-group:";
-
-const char *stateName(LoadState s) {
-    switch (s) {
-        case LoadState::NONE: return "none";
-        case LoadState::LOADING: return "loading";
-        case LoadState::LOADED: return "loaded";
-        case LoadState::FAILED: return "failed";
-    }
-    return "?";
-}
-
-std::string describeStatus(long status) {
-    switch (status) {
-        case -1:  return "Spotify changed its search API. Update Spotivita.";
-        case 0:   return "No connection to Spotify. Check the Wi-Fi.";
-        case 401: return "Spotify session expired. Restart the app.";
-        case 403: return "Spotify refused this action (Premium required).";
-        case 404: return "Spotify could not find this item.";
-        case 429: return "Spotify is rate limiting this app. Try again in a minute.";
-        default:  return "Spotify error " + std::to_string(status) + ".";
-    }
-}
+const char *ALBUM_HEADER = "spotify:album:";
 
 std::string idFromUri(const std::string &uri, const char *prefix) {
     size_t n = strlen(prefix);
     return uri.compare(0, n, prefix) == 0 ? uri.substr(n) : uri;
-}
-
-bool startsWith(const std::string &s, const char *prefix) {
-    return s.compare(0, strlen(prefix), prefix) == 0;
 }
 
 // Folder names in the rootlist are form-encoded: '+' for space, %XX bytes.
@@ -135,125 +137,6 @@ std::string formDecode(const std::string &s) {
     return out;
 }
 
-// Drops what the font cannot draw (emoji, CJK, joiners) instead of showing
-// '?' boxes, and the spaces left around them. A name made only of such
-// characters stays "?".
-std::string displayable(ImFont *font, const std::string &text) {
-    std::string out;
-    bool dropped = false;
-    const char *p = text.c_str(), *end = p + text.size();
-    while (p < end) {
-        unsigned int c = 0;
-        int len = ImTextCharFromUtf8(&c, p, end);
-        if (len <= 0) break;
-        bool keep = c < 0x80 || (c <= 0xFFFF &&
-                    font->FindGlyphNoFallback(static_cast<ImWchar>(c)) != nullptr);
-        if (keep && !(c == ' ' && (out.empty() || out.back() == ' '))) {
-            out.append(p, len);
-        }
-        dropped |= !keep;
-        p += len;
-    }
-    if (!dropped) return text;
-    while (!out.empty() && out.back() == ' ') out.pop_back();
-    return out.empty() ? std::string("?") : out;
-}
-
-// Cuts text to maxW pixels with a trailing "...", on UTF-8 boundaries.
-std::string fitText(ImFont *font, const std::string &raw, float maxW) {
-    std::string text = displayable(font, raw);
-    float size = font->FontSize;
-    if (font->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str()).x <= maxW) return text;
-    const float dots = font->CalcTextSizeA(size, FLT_MAX, 0.0f, "...").x;
-    size_t end = text.size();
-    while (end > 0) {
-        do {
-            end--;
-        } while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80);
-        float w = font->CalcTextSizeA(size, FLT_MAX, 0.0f, text.c_str(), text.c_str() + end).x;
-        if (w + dots <= maxW) break;
-    }
-    while (end > 0 && text[end - 1] == ' ') end--;
-    return text.substr(0, end) + "...";
-}
-
-// Flat icon button with explicit glyph/background colors.
-bool iconButton(const char* label, ImVec2 size, ImU32 fg, ImU32 bg) {
-    ImGui::PushStyleColor(ImGuiCol_Button, bg);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, bg);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, bg);
-    ImGui::PushStyleColor(ImGuiCol_Text, fg);
-    bool r = ImGui::Button(label, size);
-    ImGui::PopStyleColor(4);
-    return r;
-}
-
-// Square art at the left of a library row: an icon on a flat tile, standing in
-// for the cover.
-struct RowArt {
-    const char *icon;     // glyph of the small icon font, or nullptr
-    ImU32 bg;
-    ImU32 fg;
-};
-
-// Full-width list row: optional art tile, title, optional grey subtitle,
-// optional grey text at the right end (a duration), highlight while pressed.
-// Long text ends in "...". Rows outside the view only take their space.
-bool listRow(const char *id, const std::string &title, const std::string &subtitle,
-             float width, ImU32 fg, ImFont *subFont, const RowArt *art = nullptr,
-             ImFont *artFont = nullptr, const std::string &right = std::string()) {
-    const float h = (subtitle.empty() && art == nullptr) ? 50.0f : 60.0f;
-    ImVec2 p = ImGui::GetCursorScreenPos();
-    bool clicked = ImGui::InvisibleButton(id, ImVec2(width, h));
-    if (!ImGui::IsItemVisible()) return clicked;
-    bool held = ImGui::IsItemActive();
-    bool focused = ImGui::IsItemFocused();
-    ImDrawList *dl = ImGui::GetWindowDrawList();
-    if (held || focused) {
-        dl->AddRectFilled(p, ImVec2(p.x + width, p.y + h), COL_ROW_HI, 6.0f);
-    }
-    float tx = p.x + 8.0f;
-    if (art != nullptr) {
-        const float side = 48.0f;
-        ImVec2 a(p.x + 6.0f, p.y + (h - side) * 0.5f);
-        dl->AddRectFilled(a, ImVec2(a.x + side, a.y + side), art->bg, 4.0f);
-        if (art->icon != nullptr && artFont != nullptr) {
-            ImVec2 isz = artFont->CalcTextSizeA(artFont->FontSize, FLT_MAX, 0.0f, art->icon);
-            dl->AddText(artFont, artFont->FontSize,
-                        ImVec2(a.x + (side - isz.x) * 0.5f, a.y + (side - isz.y) * 0.5f),
-                        art->fg, art->icon);
-        }
-        tx = a.x + side + 12.0f;
-    }
-    float maxW = p.x + width - 8.0f - tx;
-    if (!right.empty()) {
-        float rw = subFont->CalcTextSizeA(subFont->FontSize, FLT_MAX, 0.0f, right.c_str()).x;
-        dl->AddText(subFont, subFont->FontSize,
-                    ImVec2(p.x + width - 10.0f - rw, p.y + (h - subFont->FontSize) * 0.5f),
-                    COL_GREY, right.c_str());
-        maxW -= rw + 14.0f;
-    }
-    ImFont *font = ImGui::GetFont();
-    float ty = subtitle.empty() ? p.y + (h - font->FontSize) * 0.5f : p.y + 6.0f;
-    dl->AddText(font, font->FontSize, ImVec2(tx, ty), fg, fitText(font, title, maxW).c_str());
-    if (!subtitle.empty()) {
-        dl->AddText(subFont, subFont->FontSize, ImVec2(tx, p.y + 8.0f + font->FontSize),
-                    COL_GREY, fitText(subFont, subtitle, maxW).c_str());
-    }
-    return clicked;
-}
-
-bool pillButton(const char *label, ImVec2 size, ImU32 bg, ImU32 fg) {
-    ImGui::PushStyleColor(ImGuiCol_Button, bg);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, bg);
-    ImGui::PushStyleColor(ImGuiCol_Text, fg);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, size.y * 0.5f);
-    bool r = ImGui::Button(label, size);
-    ImGui::PopStyleVar();
-    ImGui::PopStyleColor(3);
-    return r;
-}
-
 // Font Awesome glyph for a Spotify Connect device type.
 const char *deviceIcon(const std::string &type) {
     if (type == "SMARTPHONE") return ICON_FA_MOBILE_ALT;
@@ -264,16 +147,6 @@ const char *deviceIcon(const std::string &type) {
     if (type == "AUTOMOBILE") return ICON_FA_CAR;
     if (type == "SPEAKER" || type == "CAST_AUDIO" || type == "AUDIO_DONGLE") return ICON_FA_VOLUME_UP;
     return ICON_FA_BROADCAST_TOWER;
-}
-
-std::string fmtTime(int ms) {
-    if (ms < 0) ms = 0;
-    int s = ms / 1000;
-    int m = s / 60;
-    s %= 60;
-    char b[16];
-    snprintf(b, sizeof(b), "%d:%02d", m, s);
-    return std::string(b);
 }
 
 // Touch/mouse horizontal bar. Draws a track + fill (+ optional knob) and returns
@@ -306,34 +179,6 @@ bool barControl(const char* id, float value, ImVec2 size,
     }
     ImGui::PopID();
     return held;
-}
-
-// Spinning arc + label, drawn inline.
-void Spinner(const char* label) {
-    ImVec2 p = ImGui::GetCursorScreenPos();
-    float r = 9.0f;
-    float cx = p.x + r, cy = p.y + r + 4.0f;
-    float t = static_cast<float>(ImGui::GetTime());
-    float a0 = t * 6.0f;
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->PathClear();
-    dl->PathArcTo(ImVec2(cx, cy), r, a0, a0 + 4.2f, 24);
-    dl->PathStroke(COL_GREENV, false, 2.5f);
-    ImGui::Dummy(ImVec2(r * 2.0f + 6.0f, r * 2.0f + 4.0f));
-    if (label && *label) {
-        ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_Text, COL_GREY);
-        ImGui::TextUnformatted(label);
-        ImGui::PopStyleColor();
-    }
-}
-
-void greyText(const std::string &text) {
-    ImGui::PushStyleColor(ImGuiCol_Text, COL_GREY);
-    ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextUnformatted(text.c_str());
-    ImGui::PopTextWrapPos();
-    ImGui::PopStyleColor();
 }
 
 // Builds a library in rootlist order: folders open and close around their
@@ -466,84 +311,6 @@ void pruneCoverCache() {
         sceIoRemove((std::string(COVER_CACHE_DIR) + "/" + n).c_str());
     }
     CSPOT_LOG(info, "cover cache pruned (%d files)", static_cast<int>(names.size()));
-}
-
-// Minimal protobuf wire reader: collect every length-delimited (wire type 2)
-// field numbered `want` inside [p,end). Enough to walk playlist4 and metadata
-// messages without generating nanopb code. Field numbers:
-//   SelectedListContent: attributes=3 (ListAttributes.name=1), contents=5
-//   ListItems.items=3, Item.uri=1
-//   metadata Track: name=2, artist=4 (Artist.name=2)
-// Reads one base-128 varint; false on truncation or overflow.
-bool pbVarint(const uint8_t** p, const uint8_t* end, uint64_t* v) {
-    *v = 0;
-    for (int sh = 0; *p < end && sh < 64; sh += 7) {
-        uint8_t b = *(*p)++;
-        *v |= static_cast<uint64_t>(b & 0x7F) << sh;
-        if (!(b & 0x80)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-std::vector<std::pair<const uint8_t*, size_t>> pbLenFields(
-        const uint8_t* p, const uint8_t* end, int want) {
-    std::vector<std::pair<const uint8_t*, size_t>> out;
-    uint64_t key = 0;
-    while (p < end && pbVarint(&p, end, &key)) {
-        int field = static_cast<int>(key >> 3), wt = static_cast<int>(key & 7);
-        uint64_t len = 0;
-        if (wt == 2) {
-            if (!pbVarint(&p, end, &len) || len > static_cast<uint64_t>(end - p)) {
-                break;
-            }
-            if (field == want) {
-                out.push_back({p, static_cast<size_t>(len)});
-            }
-        } else if (wt == 0) {
-            if (!pbVarint(&p, end, &len)) {
-                break;
-            }
-            len = 0;
-        } else if (wt == 5 || wt == 1) {
-            len = wt == 5 ? 4 : 8;
-            if (static_cast<uint64_t>(end - p) < len) {
-                break;
-            }
-        } else {
-            break;
-        }
-        p += len;
-    }
-    return out;
-}
-
-std::string pbString(const std::pair<const uint8_t*, size_t> &f) {
-    return std::string(reinterpret_cast<const char*>(f.first), f.second);
-}
-
-// First varint field numbered `want` (0 if absent).
-uint64_t pbVarintField(const uint8_t* p, const uint8_t* end, int want) {
-    uint64_t key = 0;
-    while (p < end && pbVarint(&p, end, &key)) {
-        int field = static_cast<int>(key >> 3), wt = static_cast<int>(key & 7);
-        uint64_t v = 0;
-        if (wt == 0) {
-            if (!pbVarint(&p, end, &v)) break;
-            if (field == want) return v;
-        } else if (wt == 2) {
-            if (!pbVarint(&p, end, &v) || v > static_cast<uint64_t>(end - p)) break;
-            p += v;
-        } else if (wt == 5 || wt == 1) {
-            size_t len = wt == 5 ? 4 : 8;
-            if (static_cast<size_t>(end - p) < len) break;
-            p += len;
-        } else {
-            break;
-        }
-    }
-    return 0;
 }
 
 // Rootlist (SelectedListContent, decorated): contents=5 { items=3 { uri=1 },
@@ -685,69 +452,29 @@ std::string parseListName(const std::string &body) {
     return names.empty() ? "" : pbString(names[0]);
 }
 
-struct TrackMeta {
-    std::string name, artist, album;
-    std::string coverUrl;   // album cover, "" if none
-    int durationMs = 0;
+// Header of a playlist opened from the catalog: attributes=3 { name=1,
+// picture=13 { size=1, url=2 } }, owner_username=16.
+struct ListHeader {
+    std::string name, picture, owner;
 };
 
-// metadata Track: name=2, album=3 { name=2, cover_group=17 { image=1 {
-// file_id=1, size=2 } } }, artist=4 { name=2 }, duration=7.
-TrackMeta parseTrackMeta(const uint8_t *data, const uint8_t *end) {
-    TrackMeta m;
-    auto n = pbLenFields(data, end, 2);
-    if (!n.empty()) m.name = pbString(n[0]);
-    auto album = pbLenFields(data, end, 3);
-    if (!album.empty()) {
-        const uint8_t *ab = album[0].first, *ae = album[0].first + album[0].second;
-        auto an = pbLenFields(ab, ae, 2);
-        if (!an.empty()) m.album = pbString(an[0]);
-        // The default size (0, about 300 px) suits the pane; else the first.
-        auto group = pbLenFields(ab, ae, 17);
-        std::string fileId;
-        for (auto &img : group.empty() ? decltype(group)() : pbLenFields(group[0].first,
-                                                                          group[0].first + group[0].second, 1)) {
-            auto id = pbLenFields(img.first, img.first + img.second, 1);
-            if (id.empty()) continue;
-            bool isDefault = pbVarintField(img.first, img.first + img.second, 2) == 0;
-            if (fileId.empty() || isDefault) fileId = pbString(id[0]);
-            if (isDefault) break;
-        }
-        static const char *hex = "0123456789abcdef";
-        for (unsigned char c : fileId) {
-            if (m.coverUrl.empty()) m.coverUrl = "https://i.scdn.co/image/";
-            m.coverUrl += hex[c >> 4];
-            m.coverUrl += hex[c & 0x0F];
-        }
-    }
-    for (auto &a : pbLenFields(data, end, 4)) {
-        auto an = pbLenFields(a.first, a.first + a.second, 2);
-        if (an.empty()) continue;
-        if (!m.artist.empty()) m.artist += ", ";
-        m.artist += pbString(an[0]);
-    }
-    // duration is a sint32: zigzag encoded.
-    uint64_t z = pbVarintField(data, end, 7);
-    m.durationMs = static_cast<int>((z >> 1) ^ (~(z & 1) + 1));
-    return m;
-}
-
-// extended-metadata BatchedExtensionResponse: extended_metadata=2 {
-// extension_data=3 { header=1 { status_code=1 }, entity_uri=2,
-// extension_data=3 (Any) { value=2: Track } } }. Fills out by URI.
-void parseExtendedMetadata(const std::string &body, std::map<std::string, TrackMeta> *out) {
+ListHeader parseListHeader(const std::string &body) {
+    ListHeader h;
     const uint8_t *data = reinterpret_cast<const uint8_t*>(body.data());
-    for (auto &arr : pbLenFields(data, data + body.size(), 2)) {
-        for (auto &d : pbLenFields(arr.first, arr.first + arr.second, 3)) {
-            const uint8_t *dp = d.first, *de = d.first + d.second;
-            auto uri = pbLenFields(dp, de, 2);
-            auto any = pbLenFields(dp, de, 3);
-            if (uri.empty() || any.empty()) continue;
-            auto value = pbLenFields(any[0].first, any[0].first + any[0].second, 2);
-            if (value.empty()) continue;
-            (*out)[pbString(uri[0])] = parseTrackMeta(value[0].first, value[0].first + value[0].second);
+    const uint8_t *end = data + body.size();
+    h.name = parseListName(body);
+    auto attrs = pbLenFields(data, end, 3);
+    if (!attrs.empty()) {
+        for (const auto &pic : pbLenFields(attrs[0], 13)) {
+            auto url = pbLenFields(pic, 2);
+            if (url.empty()) continue;
+            h.picture = pbString(url[0]);
+            break;
         }
     }
+    auto owner = pbLenFields(data, end, 16);
+    if (!owner.empty()) h.owner = pbString(owner[0]);
+    return h;
 }
 
 // Track cache: a first line "spotivita-tracks 2", then one row per line,
@@ -932,21 +659,9 @@ std::string listSummary(size_t count, int64_t totalMs) {
     return out;
 }
 
-std::string jsonStr(cJSON *o, const char *key) {
-    cJSON *v = cJSON_GetObjectItem(o, key);
-    return (cJSON_IsString(v) && v->valuestring) ? std::string(v->valuestring) : std::string();
-}
-
-int findPlaylist(const std::vector<Playlist> &pls, const std::string &uri) {
-    for (size_t i = 0; i < pls.size(); i++) {
-        if (pls[i].uri == uri) return static_cast<int>(i);
-    }
-    return -1;
-}
-
 }  // namespace
 
-PlaybackScreen::PlaybackScreen(GUI *gui) : Screen(gui) {
+PlaybackScreen::PlaybackScreen(GUI *gui) : Screen(gui), thumbs(&gui->images) {
     int w = 0, h = 0;
     LoadTextureFromFile("app0:cover_art.png", &placeholder_tex, &w, &h);
     cover_art_tex = placeholder_tex;
@@ -962,6 +677,7 @@ PlaybackScreen::PlaybackScreen(GUI *gui) : Screen(gui) {
         libraryState = LoadState::LOADED;
     }
     gui->net.post([] { pruneCoverCache(); });
+    gui->images.post([] { prune_thumb_cache(); });
 }
 
 PlaybackScreen::~PlaybackScreen() {
@@ -973,7 +689,18 @@ PlaybackScreen::~PlaybackScreen() {
 
 void PlaybackScreen::tick() {
     PlayerModel::Snapshot snap = gui->player.snapshot();
-    if (remoteShown(snap)) snap = remoteSnapshot();
+    bool remoteNow = remoteShown(snap);
+    // Album and artists of the track shown, for the cover and its buttons.
+    std::string nowUri = remoteNow ? remote.trackUri : snap.uri;
+    if (startsWith(nowUri, SPOTIFY_TRACK_HEADER) && nowUri != nowLinks.uri) {
+        nowLinks = TrackLinks();
+        nowLinks.uri = nowUri;
+        nowLinks.state = LoadState::LOADING;
+        nowPending = 0;
+        fetchLinks(nowUri);
+    }
+    thumbs.trim();
+    if (remoteNow) snap = remoteSnapshot();
     if (!snap.imageUrl.empty() && snap.imageUrl != coverUrl) {
         fetchCover(snap.imageUrl);
     }
@@ -1031,12 +758,17 @@ void PlaybackScreen::setLibrary(std::vector<Folder> f, std::vector<Playlist> p,
             np.tracks = std::move(playlists[i].tracks);
             np.tracksState = playlists[i].tracksState;
             np.fresh = playlists[i].fresh;
+            np.filter = playlists[i].filter;
         }
         auto pref = sortPrefs.find(np.uri);
         if (pref != sortPrefs.end()) {
             np.sort = pref->second.first;
             np.sortDesc = pref->second.second;
         }
+    }
+    // Albums and playlists opened from the catalog stay after the library.
+    for (auto &old : playlists) {
+        if (old.external && findPlaylist(p, old.uri) < 0) p.push_back(std::move(old));
     }
     viewDirty = true;
     folders = std::move(f);
@@ -1181,18 +913,18 @@ void PlaybackScreen::cancelTrackLoads() {
     }
 }
 
+void PlaybackScreen::openPlaylist(int index) {
+    if (index < 0 || index >= static_cast<int>(playlists.size())) return;
+    openList(playlists[index].uri);
+}
+
 // A playlist opens from its cache file at once. Then, once per run, the whole
 // track list is fetched (one request, or Liked Songs page by page) and merged
 // with the titles already known, and the missing titles come in batches of
-// META_BATCH through extended-metadata.
-void PlaybackScreen::openPlaylist(int index) {
+// META_BATCH through extended-metadata. An album's track list comes from its
+// metadata. Lists from the catalog keep no cache file.
+void PlaybackScreen::ensureTracks(int index) {
     if (index < 0 || index >= static_cast<int>(playlists.size())) return;
-    if (index != openIndex) {
-        filter.clear();
-        scrollToRow = -1;
-    }
-    openIndex = index;
-    viewDirty = true;
     Playlist &pl = playlists[index];
     if (pl.tracksState == LoadState::LOADED || pl.tracksState == LoadState::LOADING) return;
     cancelTrackLoads();
@@ -1201,9 +933,10 @@ void PlaybackScreen::openPlaylist(int index) {
     std::string uri = pl.uri;
     std::vector<TrackRow> known = pl.tracks;
     bool fresh = pl.fresh;
+    bool external = pl.external;
 
     GUI *g = gui;
-    gui->net.post([this, g, gen, uri, known, fresh] {
+    gui->net.post([this, g, gen, uri, known, fresh, external] {
         // Replaces the GUI copy when it still holds the same list, or when
         // rows is the fresh list from Spotify.
         auto deliverRows = [this, g, uri](const std::vector<TrackRow> &rows, bool isFresh) {
@@ -1224,7 +957,7 @@ void PlaybackScreen::openPlaylist(int index) {
         // Titles saved by an earlier run.
         bool missing = rows.empty();
         for (const auto &r : rows) missing |= r.name.empty();
-        if (missing) {
+        if (missing && !external) {
             std::vector<TrackRow> cached = loadTrackCache(uri);
             if (rows.empty()) {
                 rows = std::move(cached);
@@ -1256,10 +989,45 @@ void PlaybackScreen::openPlaylist(int index) {
                     }
                     token = parseLikedPage(d.body, &items);
                 } while (!token.empty() && items.size() < SPOTIFY_LIKED_LIMIT && gen == tracksGen);
+            } else if (startsWith(uri, ALBUM_HEADER)) {
+                ApiResult d = g->api.get_extended({uri}, EXT_ALBUM_V4);
+                AlbumMeta album;
+                bool ok = false;
+                if (d.ok()) {
+                    auto entities = parseExtendedEntities(d.body);
+                    auto it = entities.find(uri);
+                    ok = it != entities.end() && parseAlbumMeta(it->second, &album);
+                }
+                if (ok) {
+                    for (const auto &t : album.trackUris) items.push_back({t, 0});
+                    std::string sub = album.type + (album.year > 0 ? ", " + std::to_string(album.year) : "");
+                    g->net.deliver([this, uri, album, sub] {
+                        int i = findPlaylist(playlists, uri);
+                        if (i < 0) return;
+                        Playlist &p = playlists[i];
+                        if (!album.name.empty()) p.name = album.name;
+                        p.subtitle = sub;
+                        if (!album.coverUrl.empty()) p.imageUrl = album.coverUrl;
+                        if (!album.artists.empty()) p.artists = album.artists;
+                    });
+                } else {
+                    failed = d.ok() ? 404 : (d.status != 0 ? d.status : -2);
+                }
             } else {
                 ApiResult d = g->api.get_playlist(idFromUri(uri, SPOTIFY_PLAYLIST_HEADER));
                 if (d.ok()) {
                     items = parseListItems(d.body, SPOTIFY_PLAYLIST_TRACK_LIMIT);
+                    if (external) {
+                        ListHeader h = parseListHeader(d.body);
+                        g->net.deliver([this, uri, h] {
+                            int i = findPlaylist(playlists, uri);
+                            if (i < 0) return;
+                            Playlist &p = playlists[i];
+                            if (!h.name.empty()) p.name = h.name;
+                            if (!h.picture.empty()) p.imageUrl = h.picture;
+                            if (p.subtitle.empty() && !h.owner.empty()) p.subtitle = "By " + h.owner;
+                        });
+                    }
                 } else {
                     failed = d.status != 0 ? d.status : -2;
                 }
@@ -1290,7 +1058,7 @@ void PlaybackScreen::openPlaylist(int index) {
         int failStreak = 0;
         for (size_t b = 0; b < todo.size(); b += META_BATCH) {
             if (gen != tracksGen) {
-                if (dirty) saveTrackCache(uri, rows);
+                if (dirty && !external) saveTrackCache(uri, rows);
                 return;
             }
             size_t e = std::min(todo.size(), b + META_BATCH);
@@ -1337,60 +1105,12 @@ void PlaybackScreen::openPlaylist(int index) {
                 if (i == openIndex) viewDirty = true;
             });
         }
-        if (dirty) saveTrackCache(uri, rows);
+        if (dirty && !external) saveTrackCache(uri, rows);
         g->net.deliver([this, uri, gen] {
             int i = findPlaylist(playlists, uri);
             if (i >= 0 && gen == tracksGen) playlists[i].tracksState = LoadState::LOADED;
         });
     });
-}
-
-void PlaybackScreen::startSearch(const std::string &query) {
-    searchQuery = query;
-    searchResults.clear();
-    searchState = LoadState::LOADING;
-    GUI *g = gui;
-    gui->net.post([this, g, query] {
-        ApiResult r = g->api.search(query, 20);
-        std::vector<SearchTrack> found;
-        long status = r.status;
-        if (r.ok()) {
-            // pathfinder searchTracks: data.searchV2.tracksV2.items[].item.data
-            // { uri, name, artists.items[].profile.name }
-            cJSON *root = cJSON_Parse(r.body.c_str());
-            cJSON *data = root ? cJSON_GetObjectItem(root, "data") : NULL;
-            cJSON *sv2 = data ? cJSON_GetObjectItem(data, "searchV2") : NULL;
-            cJSON *tv2 = sv2 ? cJSON_GetObjectItem(sv2, "tracksV2") : NULL;
-            cJSON *items = tv2 ? cJSON_GetObjectItem(tv2, "items") : NULL;
-            if (!cJSON_IsArray(items)) status = -1;  // GraphQL errors come back as 200
-            int n = cJSON_IsArray(items) ? cJSON_GetArraySize(items) : 0;
-            for (int i = 0; i < n; i++) {
-                cJSON *item = cJSON_GetObjectItem(cJSON_GetArrayItem(items, i), "item");
-                cJSON *t = item ? cJSON_GetObjectItem(item, "data") : NULL;
-                std::string name = jsonStr(t, "name"), uri = jsonStr(t, "uri");
-                if (name.empty() || uri.empty()) continue;
-                std::string artists;
-                cJSON *ar = cJSON_GetObjectItem(t, "artists");
-                cJSON *arItems = ar ? cJSON_GetObjectItem(ar, "items") : NULL;
-                int na = cJSON_IsArray(arItems) ? cJSON_GetArraySize(arItems) : 0;
-                for (int k = 0; k < na && k < 3; k++) {
-                    cJSON *profile = cJSON_GetObjectItem(cJSON_GetArrayItem(arItems, k), "profile");
-                    std::string a = jsonStr(profile, "name");
-                    if (a.empty()) continue;
-                    if (!artists.empty()) artists += ", ";
-                    artists += a;
-                }
-                found.push_back({artists.empty() ? name : name + "\n" + artists, uri});
-            }
-            cJSON_Delete(root);
-        }
-        g->net.deliver([this, query, found, status] {
-            if (query != searchQuery) return;   // a newer search replaced this one
-            searchResults = found;
-            searchState = status >= 200 && status < 300 ? LoadState::LOADED : LoadState::FAILED;
-            if (searchState == LoadState::FAILED) gui->toast(describeStatus(status));
-        });
-    }, true);
 }
 
 void PlaybackScreen::reportPlayerError(long status) {
@@ -1409,7 +1129,7 @@ void PlaybackScreen::buildView() {
     if (openIndex < 0 || openIndex >= static_cast<int>(playlists.size())) return;
     const Playlist &pl = playlists[openIndex];
     const std::vector<TrackRow> &t = pl.tracks;
-    std::string needle = lowerAscii(filter);
+    std::string needle = lowerAscii(pl.filter);
     view.reserve(t.size());
     for (size_t i = 0; i < t.size(); i++) {
         const TrackRow &r = t[i];
@@ -1486,6 +1206,13 @@ void PlaybackScreen::playView(size_t row, bool shuffle) {
     std::vector<std::string> uris;
     uris.reserve(view.size());
     for (uint32_t i : view) uris.push_back(pl.tracks[i].uri);
+    playUris(std::move(uris), row, shuffle,
+             pl.uri == LIKED_SONGS_URI ? "spotify:user:" + gui->api.user() + ":collection" : pl.uri);
+}
+
+void PlaybackScreen::playUris(std::vector<std::string> uris, size_t row, bool shuffle,
+                              const std::string &context) {
+    if (uris.empty()) return;
     size_t start = row < uris.size() ? row : 0;
     if (shuffle) {
         size_t first = row < uris.size() ? row : static_cast<size_t>(rand_r(&shuffleSeed)) % uris.size();
@@ -1496,8 +1223,7 @@ void PlaybackScreen::playView(size_t row, bool shuffle) {
         }
         start = 0;
     }
-    queueContext = pl.uri == LIKED_SONGS_URI
-                       ? "spotify:user:" + gui->api.user() + ":collection" : pl.uri;
+    queueContext = context;
     queueUris = std::move(uris);
     sendWindow(start);
     if (shuffleOn != shuffle) {
@@ -1535,26 +1261,13 @@ void PlaybackScreen::locateCurrent(const PlayerModel::Snapshot& snap) {
     if (viewDirty || viewOf != openIndex) buildView();
     const Playlist &pl = playlists[openIndex];
     for (size_t r = 0; r < view.size() && !snap.name.empty(); r++) {
-        if (pl.tracks[view[r]].name == snap.name) {
+        const TrackRow &t = pl.tracks[view[r]];
+        if (snap.uri.empty() ? t.name == snap.name : t.uri == snap.uri) {
             scrollToRow = static_cast<int>(r);
             return;
         }
     }
     gui->toast(snap.name.empty() ? "Nothing is playing." : "The song playing is not in this list.");
-}
-
-void PlaybackScreen::playTrack(const std::string &uri) {
-    // Queue the whole result list so next/prev keep working.
-    std::vector<std::string> uris;
-    uint32_t index = 0;
-    for (const SearchTrack &t : searchResults) {
-        if (t.uri == uri) index = uris.size();
-        uris.push_back(t.uri);
-    }
-    if (uris.empty()) uris.push_back(uri);
-    queueUris.clear();
-    queueNext = 0;
-    gui->playTracksCallback(uris, "", index, false);
 }
 
 void PlaybackScreen::sendSeek(int ms) {
@@ -1752,12 +1465,19 @@ bool PlaybackScreen::goBack() {
         tab = Tab::SETTINGS;
         return true;
     }
-    if (tab != Tab::LIBRARY) return false;
-    if (openIndex >= 0) {
-        openIndex = -1;
-        cancelTrackLoads();   // stop streaming titles for a list nobody looks at
+    std::vector<Page> *stack = pageStack();
+    if (stack != nullptr && !stack->empty()) {
+        Page popped = stack->back();
+        stack->pop_back();
+        const Page *top = topPage();
+        // Stop streaming titles for a list nobody looks at.
+        if (popped.kind == Page::LIST && (top == nullptr || top->kind != Page::LIST || top->uri != popped.uri)) {
+            cancelTrackLoads();
+        }
+        syncOpen();
         return true;
     }
+    if (tab != Tab::LIBRARY) return false;
     if (openFolder >= 0 && openFolder < static_cast<int>(folders.size())) {
         openFolder = folders[openFolder].parent;
         return true;
@@ -1774,8 +1494,36 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
     if (coverSz > 210.0f) coverSz = 210.0f;
     if (coverSz < 120.0f) coverSz = 120.0f;
 
-    ImGui::SetCursorPos(ImVec2((paneW - coverSz) * 0.5f, 0.0f));
-    ImGui::Image(Render::tex_id(cover_art_tex), ImVec2(coverSz, coverSz));
+    // The cover opens the album; the buttons at its left open the album and
+    // the artist.
+    bool idle = snap.durationMs == 0 && snap.artist.empty();
+    bool links = !idle && !nowLinks.uri.empty();
+    float coverX = (paneW - coverSz) * 0.5f;
+    ImGui::SetCursorPos(ImVec2(coverX, 0.0f));
+    ImVec2 cp = ImGui::GetCursorScreenPos();
+    bool coverTap = ImGui::InvisibleButton("##cover", ImVec2(coverSz, coverSz));
+    bool coverFocus = ImGui::IsItemFocused();
+    ImDrawList *cdl = ImGui::GetWindowDrawList();
+    cdl->AddImage(Render::tex_id(cover_art_tex), cp, ImVec2(cp.x + coverSz, cp.y + coverSz));
+    if (coverFocus) {
+        cdl->AddRect(ImVec2(cp.x - 2.0f, cp.y - 2.0f), ImVec2(cp.x + coverSz + 2.0f, cp.y + coverSz + 2.0f),
+                     COL_GREENV, 4.0f, ImDrawCornerFlags_All, 3.0f);
+    }
+    if (coverTap && links) goNowAlbum();
+    if (links) {
+        ImGui::PushFont(gui->small_icon_font);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 24.0f);
+        ImGui::SetCursorPos(ImVec2(coverX - 58.0f, coverSz * 0.5f - 52.0f));
+        if (iconButton(ICON_FA_COMPACT_DISC "##nowalbum", ImVec2(48.0f, 48.0f), COL_WHITE, COL_CARD)) {
+            goNowAlbum();
+        }
+        ImGui::SetCursorPos(ImVec2(coverX - 58.0f, coverSz * 0.5f + 4.0f));
+        if (iconButton(ICON_FA_USER "##nowartist", ImVec2(48.0f, 48.0f), COL_WHITE, COL_CARD)) {
+            goNowArtist();
+        }
+        ImGui::PopStyleVar();
+        ImGui::PopFont();
+    }
     float y = coverSz + 14.0f;
 
     // Sleep timer armed: a moon and the time left, in the corner by the cover.
@@ -1795,7 +1543,6 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
                     COL_GREY, left.c_str());
     }
 
-    bool idle = snap.durationMs == 0 && snap.artist.empty();
     float textW = paneW - 24.0f;
     std::string title = idle ? std::string("Nothing playing") : snap.name;
     std::string sub = idle ? std::string(gui->cspot_started ? "Pick a playlist, or play from your phone"
@@ -1809,6 +1556,16 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
     ImGui::PushStyleColor(ImGuiCol_Text, COL_GREY);
     TextCentered(fitText(ImGui::GetFont(), sub, textW));
     ImGui::PopStyleColor();
+    // Title and artist lines are links too (touch only: the gamepad has the
+    // buttons by the cover).
+    if (links) {
+        ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+        ImGui::SetCursorPos(ImVec2(12.0f, y));
+        if (ImGui::InvisibleButton("##titlelink", ImVec2(textW, 34.0f))) goNowAlbum();
+        ImGui::SetCursorPos(ImVec2(12.0f, y + 36.0f));
+        if (ImGui::InvisibleButton("##artistlink", ImVec2(textW, 34.0f))) goNowArtist();
+        ImGui::PopItemFlag();
+    }
     y += 76.0f;
 
     // Scrubber (position interpolated locally; seek committed on release).
@@ -2074,14 +1831,17 @@ void PlaybackScreen::drawPlaylistActions(Playlist &pl, const PlayerModel::Snapsh
     ImGui::PushFont(gui->small_icon_font);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, h * 0.5f);
     bool find = iconButton(ICON_FA_SEARCH "##filter", ImVec2(48.0f, h),
-                           filter.empty() ? COL_WHITE : COL_GREENV, COL_CARD);
+                           pl.filter.empty() ? COL_WHITE : COL_GREENV, COL_CARD);
     ImGui::SameLine();
     bool locate = iconButton(ICON_FA_CROSSHAIRS "##locate", ImVec2(48.0f, h), COL_WHITE, COL_CARD);
     ImGui::PopStyleVar();
     ImGui::PopFont();
     if (find) {
-        Keyboard::Open("Filter this playlist", filter, [this](const std::string &q) {
-            filter = q;
+        std::string uri = pl.uri;
+        Keyboard::Open("Filter this list", pl.filter, [this, uri](const std::string &q) {
+            int i = findPlaylist(playlists, uri);
+            if (i < 0) return;
+            playlists[i].filter = q;
             viewDirty = true;
             scrollToRow = 0;
         });
@@ -2090,8 +1850,8 @@ void PlaybackScreen::drawPlaylistActions(Playlist &pl, const PlayerModel::Snapsh
 
     ImGui::SetNextWindowPos(ImVec2(sortMin.x, sortMax.y + 4.0f), ImGuiCond_Always);
     ImGui::PushStyleVar(ImGuiStyleVar_SelectableTextAlign, ImVec2(0.0f, 0.5f));
-    sortMenuOpen = ImGui::BeginPopup("##sort");
-    if (sortMenuOpen) {
+    if (ImGui::BeginPopup("##sort")) {
+        popupOpen = true;
         for (int m = 0; m < SORT_COUNT; m++) {
             bool on = pl.sort == m;
             ImGui::PushStyleColor(ImGuiCol_Text, on ? COL_GREENV : COL_WHITE);
@@ -2168,7 +1928,13 @@ void PlaybackScreen::drawPlaylist(const PlayerModel::Snapshot& snap, float avail
         goBack();
         return;
     }
+    if (pl.external) {
+        int shown = openIndex;
+        drawListHeader(pl, avail);
+        if (openIndex != shown) return;   // an artist button opened a page
+    }
     if (viewDirty || viewOf != openIndex) buildView();
+    const std::string &filter = pl.filter;
 
     // "3797 songs, 11 h 20 min", or the matches of the filter.
     std::string summary;
@@ -2188,7 +1954,7 @@ void PlaybackScreen::drawPlaylist(const PlayerModel::Snapshot& snap, float avail
         std::string chip = "Clear filter \"" + fitText(ImGui::GetFont(), filter, avail - 240.0f) + "\"";
         ImGui::Dummy(ImVec2(0.0f, 2.0f));
         if (pillButton((chip + "##clearfilter").c_str(), ImVec2(0.0f, 40.0f), COL_GREENV, COL_DARK)) {
-            filter.clear();
+            pl.filter.clear();
             viewDirty = true;
         }
     }
@@ -2199,13 +1965,13 @@ void PlaybackScreen::drawPlaylist(const PlayerModel::Snapshot& snap, float avail
         if (pl.tracksState == LoadState::LOADING) {
             Spinner("Loading tracks...");
         } else if (pl.tracksState == LoadState::FAILED) {
-            greyText("Could not load this playlist.");
+            greyText("Could not load this list.");
             if (pillButton("Try again", ImVec2(160.0f, 44.0f), COL_WHITE, COL_DARK)) {
                 pl.tracksState = LoadState::NONE;
-                openPlaylist(openIndex);
+                ensureTracks(openIndex);
             }
         } else {
-            greyText("This playlist has no playable tracks.");
+            greyText("No playable tracks here.");
         }
         return;
     }
@@ -2218,7 +1984,7 @@ void PlaybackScreen::drawPlaylist(const PlayerModel::Snapshot& snap, float avail
     // onto the next one) are laid out: a 4000-row list costs the same as a
     // short one.
     fastScroll = view.size() > FAST_SCROLL_MIN;
-    float rowW = fastScroll ? avail - 34.0f : avail;
+    float rowW = (fastScroll ? avail - 34.0f : avail) - 48.0f;   // room for the menu button
     float step = TRACK_ROW_H + ImGui::GetStyle().ItemSpacing.y;
     float y0 = ImGui::GetCursorPosY();
     float winH = ImGui::GetWindowHeight();
@@ -2239,58 +2005,28 @@ void PlaybackScreen::drawPlaylist(const PlayerModel::Snapshot& snap, float avail
         ImGui::SetCursorPosY(y0 + r * step);
         const TrackRow &row = pl.tracks[view[r]];
         std::string id = "##t" + std::to_string(view[r]);
-        bool current = !row.name.empty() && row.name == snap.name;
+        bool current = snap.uri.empty() ? !row.name.empty() && row.name == snap.name : row.uri == snap.uri;
         ImU32 fg = row.durationMs == 0 ? COL_DIM : (current ? COL_GREENV : COL_WHITE);
         std::string right = row.durationMs > 0 ? fmtTime(row.durationMs) : std::string();
-        if (listRow(id.c_str(), row.name.empty() ? std::string("...") : row.name,
-                    row.artist.empty() ? std::string(" ") : row.artist, rowW, fg, gui->log_font,
-                    nullptr, nullptr, right)) {
-            playView(static_cast<size_t>(r), false);
+        bool tapped = listRow(id.c_str(), row.name.empty() ? std::string("...") : row.name,
+                              row.artist.empty() ? std::string(" ") : row.artist, rowW, fg, gui->log_font,
+                              nullptr, nullptr, right);
+        bool focused = ImGui::IsItemFocused();
+        ImGui::SameLine(0.0f, 8.0f);
+        bool more = moreButton(id);
+        if (focused || more) {
+            std::string uri = row.uri, name = row.name, artist = row.artist;
+            auto open = [this, uri, name, artist] { openTrackMenu(uri, name, artist, Link(), {}); };
+            if (more) open();
+            if (focused) focusedMenu = open;
         }
+        if (tapped) playView(static_cast<size_t>(r), false);
     }
     ImGui::SetCursorPosY(y0 + n * step);
     if (pl.tracksState == LoadState::LOADING) {
         Spinner("");
     }
     if (fastScroll) drawFastScroll(pl, y0, step);
-}
-
-void PlaybackScreen::drawSearch(float avail) {
-    ImGui::PushFont(gui->font_bold);
-    ImGui::TextUnformatted("Search");
-    ImGui::PopFont();
-    ImGui::Dummy(ImVec2(0.0f, 4.0f));
-
-    std::string label = searchQuery.empty() ? std::string("Songs, artists...") : searchQuery;
-    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.05f, 0.5f));
-    bool open = pillButton((fitText(ImGui::GetFont(), label, avail - 40.0f) + "##q").c_str(),
-                           ImVec2(avail, 46.0f), COL_CARD, searchQuery.empty() ? COL_GREY : COL_WHITE);
-    ImGui::PopStyleVar();
-    if (open) {
-        Keyboard::Open("Search Spotify", searchQuery, [this](const std::string &q) {
-            if (!q.empty()) startSearch(q);
-        });
-    }
-    ImGui::Dummy(ImVec2(0.0f, 4.0f));
-
-    if (searchState == LoadState::LOADING) {
-        Spinner("Searching...");
-    } else if (searchState == LoadState::LOADED && searchResults.empty()) {
-        greyText("No results.");
-    } else if (searchState == LoadState::FAILED) {
-        greyText("Search failed. Tap the field to try again.");
-    }
-    std::string playing = gui->player.snapshot().name;
-    for (size_t i = 0; i < searchResults.size(); i++) {
-        const std::string &l = searchResults[i].label;
-        size_t nl = l.find('\n');
-        std::string id = "##r" + std::to_string(i);
-        bool current = l.substr(0, nl) == playing;
-        if (listRow(id.c_str(), l.substr(0, nl), nl == std::string::npos ? "" : l.substr(nl + 1),
-                    avail, current ? COL_GREENV : COL_WHITE, gui->log_font)) {
-            playTrack(searchResults[i].uri);
-        }
-    }
 }
 
 void PlaybackScreen::drawLog(float avail) {
@@ -2411,16 +2147,28 @@ void PlaybackScreen::drawSleepTimer(float avail) {
 
 void PlaybackScreen::drawBrowse(const PlayerModel::Snapshot& snap) {
     float avail = ImGui::GetContentRegionAvail().x;
+    const Page *top = topPage();
+    if (top != nullptr) {
+        Page page = *top;   // drawing may push or pop pages
+        switch (page.kind) {
+            case Page::LIST:
+                if (openIndex >= 0 && openIndex < static_cast<int>(playlists.size())) drawPlaylist(snap, avail);
+                break;
+            case Page::ARTIST:
+                drawArtist(page.uri, snap.uri, avail);
+                break;
+            case Page::SECTION:
+                drawSection(page.uri, page.section, snap.uri, avail);
+                break;
+        }
+        return;
+    }
     switch (tab) {
         case Tab::LIBRARY:
-            if (openIndex >= 0 && openIndex < static_cast<int>(playlists.size())) {
-                drawPlaylist(snap, avail);
-            } else {
-                drawLibrary(snap, avail);
-            }
+            drawLibrary(snap, avail);
             break;
         case Tab::SEARCH:
-            drawSearch(avail);
+            drawSearch(snap, avail);
             break;
         case Tab::LOG:
             drawLog(avail);
@@ -2448,13 +2196,15 @@ void PlaybackScreen::drawNav() {
     for (int i = 0; i < 3; i++) {
         if (i > 0) ImGui::SameLine();
         if (StyleButton(kTabs[i].icon, nb, shown == kTabs[i].tab)) {
-            // Tapping Library again goes back to the top of the library.
-            if (tab == Tab::LIBRARY && kTabs[i].tab == Tab::LIBRARY) {
-                if (openIndex >= 0) cancelTrackLoads();
-                openIndex = -1;
+            // Tapping the tab shown again goes back to its top.
+            if (tab == kTabs[i].tab && tab == Tab::LIBRARY) {
                 openFolder = -1;
+                clearPages(0);
+            } else if (tab == kTabs[i].tab && tab == Tab::SEARCH) {
+                clearPages(1);
             }
             tab = kTabs[i].tab;
+            syncOpen();
         }
     }
 
@@ -2463,6 +2213,8 @@ void PlaybackScreen::drawNav() {
 }
 
 void PlaybackScreen::draw() {
+    thumbs.newFrame();
+    syncOpen();
     PlayerModel::Snapshot snap = gui->player.snapshot();
     // Another device plays and this one does not: the pane follows it.
     remoteMode = remoteShown(snap);
@@ -2477,14 +2229,18 @@ void PlaybackScreen::draw() {
     }
     if (pressed & SCE_CTRL_SELECT) {
         tab = tab == Tab::LIBRARY ? Tab::SEARCH : (tab == Tab::SEARCH ? Tab::SETTINGS : Tab::LIBRARY);
+        syncOpen();
     }
-    // Circle closes the sort menu (ImGui does it) without leaving the list.
-    // The menu sets the flag again each frame it is drawn.
-    bool menuWasOpen = sortMenuOpen;
-    sortMenuOpen = false;
+    // Circle closes a menu (ImGui does it) without leaving the page. A menu
+    // sets the flag again each frame it is drawn.
+    bool menuWasOpen = popupOpen;
+    popupOpen = false;
     if (Input::back_pressed() && !menuWasOpen) {
         goBack();
     }
+    // Triangle: the menu of the track row the gamepad is on (last frame).
+    if ((pressed & SCE_CTRL_TRIANGLE) && focusedMenu && !menuWasOpen) focusedMenu();
+    focusedMenu = nullptr;
 
     float fullW = ImGui::GetContentRegionAvail().x;
     float leftW = fullW * 0.46f;
@@ -2506,12 +2262,19 @@ void PlaybackScreen::draw() {
         float navH = 76.0f;
         // One scroll position per view: the ID changes with the view, so
         // opening a playlist or a folder starts at its top.
+        // Back returns to the scroll position the page had.
         std::string browseId = "browse" + std::to_string(static_cast<int>(tab));
-        if (tab == Tab::LIBRARY) {
-            browseId += "_" + std::to_string(openIndex) + "_" + std::to_string(openFolder);
+        const Page *top = topPage();
+        if (top != nullptr) {
+            browseId += "_p" + std::to_string(static_cast<int>(top->kind)) + "_" + top->uri + "_" +
+                        std::to_string(top->section);
+        } else if (tab == Tab::LIBRARY) {
+            browseId += "_f" + std::to_string(openFolder);
+        } else if (tab == Tab::SEARCH) {
+            browseId += "_c" + std::to_string(searchChip) + "_" + std::to_string(searchGen.load());
         }
         // A long list has its own thumb in place of the scrollbar.
-        bool thumb = fastScroll && tab == Tab::LIBRARY && openIndex >= 0;
+        bool thumb = fastScroll && top != nullptr && top->kind == Page::LIST && openIndex >= 0;
         ImGui::BeginChild(browseId.c_str(), ImVec2(0.0f, ImGui::GetContentRegionAvail().y - navH),
                           false, ImGuiWindowFlags_NavFlattened |
                                  (thumb ? ImGuiWindowFlags_NoScrollbar : 0));
@@ -2524,6 +2287,7 @@ void PlaybackScreen::draw() {
         ImGui::EndChild();
     }
     ImGui::EndChild();
+    drawTrackMenu();
 }
 
 std::string PlaybackScreen::debugState() {
@@ -2569,7 +2333,11 @@ std::string PlaybackScreen::debugState() {
                ",\"total_min\":" + std::to_string(viewTotalMs / 60000) +
                ",\"sort\":" + json_quote(kSortKeys[p.sort]) +
                ",\"desc\":" + (p.sortDesc ? "true" : "false") +
-               ",\"filter\":" + json_quote(filter) +
+               ",\"filter\":" + json_quote(p.filter) +
+               ",\"external\":" + (p.external ? "true" : "false") +
+               ",\"subtitle\":" + json_quote(p.subtitle) +
+               ",\"artists\":" + std::to_string(p.artists.size()) +
+               ",\"image\":" + (p.imageUrl.empty() ? "false" : "true") +
                ",\"scroll\":" + std::to_string(static_cast<int>(lastScrollY)) +
                ",\"tracks\":[";
         // The view in display order: "row:title - artist (m:ss)".
@@ -2589,9 +2357,7 @@ std::string PlaybackScreen::debugState() {
            ",\"sleep\":" + (sleepEndOfTrack ? json_quote("track")
                               : sleepAtUs == 0 ? json_quote("off")
                               : std::to_string(sleepAtUs > now ? (sleepAtUs - now) / 1000000ULL : 0));
-    out += ",\"search\":{\"query\":" + json_quote(searchQuery) +
-           ",\"state\":" + json_quote(stateName(searchState)) +
-           ",\"results\":" + std::to_string(searchResults.size()) + "}}";
+    out += "," + browseState() + "}";
     return out;
 }
 
@@ -2612,15 +2378,19 @@ bool PlaybackScreen::debugCommand(const std::string &cmd, const std::string &arg
         return true;
     }
     if (cmd == "open") {
+        // open N: library row N, over the library's top.
+        int i = atoi(arg.c_str());
+        if (i < 0 || i >= static_cast<int>(playlists.size())) return false;
         tab = Tab::LIBRARY;
-        openPlaylist(atoi(arg.c_str()));
+        clearPages(0);
+        openPlaylist(i);
         return true;
     }
     if (cmd == "folder") {
         int i = atoi(arg.c_str());
         if (i < 0 || i >= static_cast<int>(folders.size())) return false;
         tab = Tab::LIBRARY;
-        openIndex = -1;
+        clearPages(0);
         openFolder = i;
         return true;
     }
@@ -2628,8 +2398,8 @@ bool PlaybackScreen::debugCommand(const std::string &cmd, const std::string &arg
         goBack();
         return true;
     }
-    bool listOpen = tab == Tab::LIBRARY && openIndex >= 0 &&
-                    openIndex < static_cast<int>(playlists.size());
+    syncOpen();
+    bool listOpen = openIndex >= 0 && openIndex < static_cast<int>(playlists.size());
     if (cmd == "play") {
         // play N: row N of the open playlist, as shown (sorted, filtered).
         if (!listOpen) return false;
@@ -2661,7 +2431,7 @@ bool PlaybackScreen::debugCommand(const std::string &cmd, const std::string &arg
     }
     if (cmd == "filter") {
         if (!listOpen) return false;
-        filter = arg;
+        playlists[openIndex].filter = arg;
         viewDirty = true;
         scrollToRow = 0;
         return true;
@@ -2760,5 +2530,5 @@ bool PlaybackScreen::debugCommand(const std::string &cmd, const std::string &arg
         }
         return false;
     }
-    return false;
+    return browseCommand(cmd, arg);
 }

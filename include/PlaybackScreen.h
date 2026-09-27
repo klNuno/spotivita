@@ -4,6 +4,7 @@
 #include "Render.h"
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <utility>
@@ -11,6 +12,8 @@
 #include "Screen.h"
 #include "PlayerModel.h"
 #include "ConnectWatch.h"
+#include "Catalog.h"
+#include "Thumbs.h"
 
 enum class LoadState { NONE, LOADING, LOADED, FAILED };
 
@@ -28,9 +31,11 @@ struct TrackRow {
 enum TrackSort { SORT_CUSTOM, SORT_TITLE, SORT_ARTIST, SORT_ALBUM, SORT_ADDED, SORT_DURATION,
                  SORT_COUNT };
 
+// A track list: a library playlist, Liked Songs, or an album or playlist
+// opened from search or an artist page (external: kept for this run only).
 struct Playlist {
     std::string name;
-    std::string uri;      // spotify:playlist:<id>, or LIKED_SONGS_URI
+    std::string uri;      // spotify:playlist:<id>, spotify:album:<id>, or LIKED_SONGS_URI
     int folder = -1;      // index into folders, -1 = library root
     int length = 0;       // track count from the rootlist, 0 if unknown
     std::vector<TrackRow> tracks;
@@ -38,6 +43,13 @@ struct Playlist {
     bool fresh = false;   // track list fetched from Spotify this run
     int sort = SORT_CUSTOM;
     bool sortDesc = false;
+    std::string filter;   // matched on title, artist and album
+    bool external = false;
+    // Header of an external list: cover, "Album, 2001" or "By Spotify", and
+    // the album's artists.
+    std::string imageUrl;
+    std::string subtitle;
+    std::vector<Link> artists;
 };
 
 // A folder of the Spotify library: the rootlist brackets its playlists with
@@ -61,9 +73,28 @@ struct RemoteTrack {
     int durationMs = 0;
 };
 
-struct SearchTrack {
-    std::string label;    // "Title  -  Artist"
-    std::string uri;
+// A page opened over the library or the search results; back pops it.
+struct Page {
+    enum Kind { LIST, ARTIST, SECTION };
+    Kind kind = LIST;
+    std::string uri;      // the list, or the artist
+    int section = 0;      // SECTION: the ArtistSection shown whole
+};
+
+struct ArtistView {
+    ArtistInfo info;
+    LoadState state = LoadState::NONE;
+    bool loadingMore[AS_COUNT] = {};
+    bool paged[AS_COUNT] = {};   // the section came from its own query
+};
+
+// A track's album and artists: the track menu, and the links of the track
+// the now-playing pane shows.
+struct TrackLinks {
+    std::string uri, name, artist;
+    Link album;
+    std::vector<Link> artists;
+    LoadState state = LoadState::NONE;
 };
 
 // Everything here runs on the GUI thread. Network work is posted to
@@ -92,7 +123,7 @@ class PlaybackScreen: public Screen {
     void drawBrowse(const PlayerModel::Snapshot& snap);
     void drawLibrary(const PlayerModel::Snapshot& snap, float avail);
     void drawPlaylist(const PlayerModel::Snapshot& snap, float avail);
-    void drawSearch(float avail);
+    void drawSearch(const PlayerModel::Snapshot& snap, float avail);
     void drawLog(float avail);
     bool drawBackHeader(const std::string &title, float avail);
     void drawSettings(float avail);
@@ -100,13 +131,47 @@ class PlaybackScreen: public Screen {
     void drawNav();
     void drawPlaylistActions(Playlist &pl, const PlayerModel::Snapshot& snap, float avail);
     void drawFastScroll(const Playlist &pl, float y0, float step);
+    void drawListHeader(const Playlist &pl, float avail);
+    void drawSearchAll(const std::string &playing, float avail);
+    void drawSearchKind(int kind, const std::string &playing, float avail);
+    void drawArtist(const std::string &uri, const std::string &playing, float avail);
+    void drawSection(const std::string &uri, int section, const std::string &playing, float avail);
+    // A search or artist-page row with its cover; tracks get a menu button.
+    // True when the row itself was tapped.
+    bool drawItem(const CatalogItem &it, const std::string &id, float width, bool current);
+    // The three-dot button at the end of a track row.
+    bool moreButton(const std::string &id);
+    void drawTrackMenu();
+    // Debug server: the catalog part of the state (JSON members, no braces)
+    // and its commands.
+    std::string browseState();
+    bool browseCommand(const std::string &cmd, const std::string &arg);
 
     // Previous restarts the track past its first seconds, like Spotify.
     void previous(const PlayerModel::Snapshot& snap);
     void togglePlay(const PlayerModel::Snapshot& snap);
     void skipNext();
-    // Leaves the open playlist, then the open folder. False at the top.
+    // Pops the page shown, then leaves the open folder. False at the top.
     bool goBack();
+
+    // Navigation. Library and Search each keep a stack of pages; the other
+    // tabs open pages in the library.
+    std::vector<Page> *pageStack();
+    const Page *topPage();
+    void pushPage(const Page &page);
+    void clearPages(int which);
+    // Points openIndex at the list the top page shows and starts what the
+    // page still needs to load.
+    void syncOpen();
+    void openList(const std::string &uri, const std::string &name = "",
+                  const std::string &imageUrl = "", const std::string &subtitle = "");
+    void openArtist(const std::string &uri);
+    void openSection(const std::string &artistUri, int section);
+    void openItem(const CatalogItem &it);
+    void openTrackMenu(const std::string &uri, const std::string &name, const std::string &artist,
+                       const Link &album, const std::vector<Link> &links);
+    void goNowAlbum();
+    void goNowArtist();
 
     // Swaps in a fresh library, keeping loaded tracks and the open view.
     void setLibrary(std::vector<Folder> f, std::vector<Playlist> p,
@@ -115,10 +180,20 @@ class PlaybackScreen: public Screen {
     // Network actions (post jobs to the worker).
     void loadLibrary();
     void openPlaylist(int index);
+    // Fetches the track list and the missing titles of playlists[index].
+    void ensureTracks(int index);
     void cancelTrackLoads();
+    // Drops the oldest external lists no page shows once there are too many.
+    void pruneExternal();
     void startSearch(const std::string& query);
+    void loadSearch(int kind, int offset);
+    void activateSearch(int kind, size_t index);
+    void loadArtist(const std::string &uri);
+    // The whole section from its own query (the overview has the first ten),
+    // or its next page.
+    void loadReleases(const std::string &uri, int section);
+    void fetchLinks(const std::string &uri);
     void fetchCover(const std::string& url);
-    void playTrack(const std::string& uri);
 
     // Open playlist: view = its rows after filter and sort.
     void buildView();
@@ -126,6 +201,10 @@ class PlaybackScreen: public Screen {
     // Plays the view from row (SIZE_MAX: first row, or a random one when
     // shuffling). Shuffle plays the whole list in random order.
     void playView(size_t row, bool shuffle);
+    // Plays the tracks among items from items[index], the same way.
+    void playItems(const std::vector<CatalogItem> &items, size_t index, const std::string &context,
+                   bool shuffle);
+    void playUris(std::vector<std::string> uris, size_t row, bool shuffle, const std::string &context);
     // Plays queueUris[start] from a window of QUEUE_MAX tracks around it; the
     // rest follows through continueQueue().
     void sendWindow(size_t start);
@@ -154,7 +233,8 @@ class PlaybackScreen: public Screen {
     vita2d_texture *cover_art_tex = nullptr;
     std::string coverUrl;          // url of the cover shown or being fetched
 
-    // Library. playlists[0] is always Liked Songs.
+    // Library. playlists[0] is always Liked Songs; external lists follow the
+    // library's.
     std::vector<Playlist> playlists;
     std::vector<Folder> folders;
     std::vector<LibraryEntry> order;
@@ -163,7 +243,11 @@ class PlaybackScreen: public Screen {
     bool libraryRefreshed = false;  // the cached library was refreshed this run
     int namesLeft = 0;             // names still being resolved (spinner)
     int openFolder = -1;           // folder shown by the library, -1 = root
-    int openIndex = -1;            // -1 = folder view, else index into playlists
+    int openIndex = -1;            // list the top page shows, else -1 (syncOpen)
+    // Page stacks: 0 over the library's folder view, 1 over the search results.
+    std::vector<Page> pages[2];
+    std::map<std::string, ArtistView> artists;
+    ThumbCache thumbs;
     // Bumped to cancel an in-flight job: a job compares its captured value with
     // the live one before each request and before delivering.
     std::atomic<int> libraryGen{0};
@@ -175,11 +259,10 @@ class PlaybackScreen: public Screen {
     bool viewDirty = true;
     int viewMissing = 0;           // rows still without a title
     int64_t viewTotalMs = 0;
-    std::string filter;            // matched on title, artist and album
     int scrollToRow = -1;          // view row to center on the next frame
     bool fastScroll = false;       // the open list shows the fast-scroll thumb
     float thumbGrab = 0.0f;        // finger offset inside the thumb
-    bool sortMenuOpen = false;     // circle closes the menu, not the playlist
+    bool popupOpen = false;        // circle closes the menu, not the page
     float lastScrollY = 0.0f;      // of the open list, for the debug state
 
     // Sort choices per playlist URI, saved in ux0:data/cspot/sorts.json.
@@ -213,10 +296,21 @@ class PlaybackScreen: public Screen {
     bool sleepEndOfTrack = false;
     std::string sleepTrack;
 
-    // Search
+    // Search: four categories, each fetched and paged on its own.
     std::string searchQuery;
-    std::vector<SearchTrack> searchResults;
-    LoadState searchState = LoadState::NONE;
+    ItemList searchLists[SEARCH_KINDS];
+    LoadState searchStates[SEARCH_KINDS] = {};
+    bool searchMore[SEARCH_KINDS] = {};   // a next page is loading
+    int searchChip = -1;           // -1 = every category, else a SearchKind
+    std::atomic<int> searchGen{0};
+
+    // Track menu, and the links of the track the now-playing pane shows.
+    TrackLinks menu;
+    bool menuRequested = false;
+    TrackLinks nowLinks;
+    int nowPending = 0;            // 1 open its album, 2 its artist, once the links arrive
+    // Triangle opens the menu of the focused track row (set while drawing).
+    std::function<void()> focusedMenu;
 
     // Log view: copied from the logger only when it changed.
     std::string logCopy;

@@ -28,9 +28,17 @@
 // search through the web player's GraphQL endpoint.
 #define SPCLIENT_BASE                      "https://spclient.wg.spotify.com"
 
-// Web player GraphQL. searchTracks hash taken from the web player on 2026-09-25.
+// Web player GraphQL. The persisted-query hashes come from the web player
+// bundle (taken on 2026-09-27); Spotify can rotate them, and then the request
+// answers errors until they are refreshed (.agents/TRAPS.md says how).
 #define PATHFINDER_URL                     "https://api-partner.spotify.com/pathfinder/v2/query"
-#define SEARCH_TRACKS_HASH                 "b02683192a98dde7966b5e6655a79eeb62713eab703eda9902c932818dd52751"
+#define PF_SEARCH_TRACKS                   "b02683192a98dde7966b5e6655a79eeb62713eab703eda9902c932818dd52751"
+#define PF_SEARCH_ARTISTS                  "7bf95d754fdbe32c8b161fbbe54d1ae50974900df4dce4c8f1afcbcad153224d"
+#define PF_SEARCH_ALBUMS                   "202cb3305e31e5a0767ba7925f28bd728cf8f8b0217e6da43909056071cd70e9"
+#define PF_SEARCH_PLAYLISTS                "d520014e748f9ea44f7707d8df1819867ac1205e8b7f3e28f22fe5fc858921b1"
+#define PF_ARTIST_OVERVIEW                 "9f8134ef565e78621f1e1793555bd6633c5ac144ae0f89604ed3ae3f80b3c8e6"
+#define PF_ARTIST_DISCOGRAPHY              "5e07d323febb57b4a56a42abbf781490e58764aa45feb6e3dc0591564fc56599"
+#define PF_ARTIST_APPEARS_ON               "9a4bb7a20d6720fe52d7b47bc001cfa91940ddf5e7113761460b4a288d18a4c1"
 
 // status: HTTP status, or 0 when the transfer failed (DNS, TLS, timeout).
 // body: raw response (protobuf for spclient, JSON for the Web API).
@@ -59,12 +67,23 @@ class API {
     ApiResult get_rootlist();
     ApiResult get_playlist(const std::string &playlistId);
     ApiResult get_track_metadata(const std::string &trackId);
-    ApiResult get_tracks_metadata(const std::vector<std::string> &uris);
+    ApiResult get_tracks_metadata(const std::vector<std::string> &uris) { return get_extended(uris, 10); }
+    // extended-metadata for the URIs, one extension kind (9 album, 10 track).
+    ApiResult get_extended(const std::vector<std::string> &uris, int kind);
     // One page of Liked Songs (collection PageResponse protobuf), newest first.
     ApiResult get_liked_page(const std::string &pageToken, int limit);
 
-    // pathfinder GraphQL searchTracks, JSON.
-    ApiResult search(const std::string &query, uint16_t limit);
+    // pathfinder GraphQL, JSON. kind: 0 tracks, 1 artists, 2 albums,
+    // 3 playlists (SearchKind).
+    ApiResult search(int kind, const std::string &query, int offset, int limit);
+    ApiResult artist_overview(const std::string &uri);
+    // section: 1 albums, 2 singles, 3 compilations, 4 appears on (ArtistSection).
+    ApiResult artist_releases(const std::string &uri, int section, int offset, int limit);
+    // Any pathfinder request (a JSON body with operationName, variables and
+    // the persisted-query hash), over the keep-alive connection.
+    ApiResult pathfinder(const std::string &body) {
+        return spclient(PATHFINDER_URL, "application/json", &body, "application/json");
+    }
 
     // The current token, refreshed when it expired (blocking).
     std::string access_token() { return bearer(false); }
@@ -96,3 +115,5 @@ class API {
 // Spotify base62 id (22 chars) -> 32 hex chars of the 128-bit gid, as the
 // metadata endpoints want it. "" if the id is malformed.
 std::string spotify_base62_to_hex(const std::string &id);
+// The reverse: 32 hex chars to the base62 id, "" if malformed.
+std::string spotify_hex_to_base62(const std::string &hex);

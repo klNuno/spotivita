@@ -29,7 +29,18 @@ network layer.
   under your finger, a button that scrolls to the song playing, and a right
   stick that speeds up the longer you hold it.
 - A sleep timer: 15 minutes, 30 minutes, 1 hour or the end of the song.
-- Track search.
+- Search for songs, artists, albums and playlists. The results page shows a
+  bit of each, with the top artist first when it matches; a chip opens one
+  kind with every result, a page at a time.
+- Artist pages: popular songs, albums, singles, compilations, "Appears on",
+  playlists and similar artists, each with a "See all" page. Play the artist
+  or shuffle it.
+- Albums and public playlists open like your own playlists, with their cover,
+  sort and filter. Nothing is added to your account: browsing is read-only.
+- Every song row has a menu (the dots, or triangle on the row) to go to its
+  album or one of its artists. On the player, tap the cover or the title for
+  the album, the artist line for the artist, or use the two buttons by the
+  cover with the gamepad.
 - Play, pause, next, previous, seek on the progress bar, shuffle, repeat and
   volume, all handled on the Vita. Pause cuts the sound at once. Previous
   restarts the track after its first 3 seconds, like Spotify.
@@ -57,7 +68,8 @@ searches and runs in the background on a real PS Vita. A dropped connection
 to Spotify used to leave the player silent and deaf to pause; the stream now
 asks for the lost audio again after the reconnect. That fix has not been
 through a real disconnect yet. The handover between the Vita and another
-device has only run against a simulated phone so far. If something breaks
+device has only run against a simulated phone so far. Artist pages, albums,
+public playlists and the song menu have only run in Vita3K. If something breaks
 on your Vita, please open an issue.
 
 ## Install
@@ -88,8 +100,11 @@ in by itself anymore, so your phone hands it a login over the local network
 - The public Web API answers 429 to every request from this client, so nothing
   depends on it. When you play a track, the Vita builds the queue itself and
   hands it to cspot.
-- Search uses a query hash from the web player. When Spotify rotates it, search
-  shows "Spotify changed its search API" until the app is updated.
+- Search and artist pages use query hashes from the web player. When Spotify
+  rotates them, those pages show "Spotify changed its API" until the app is
+  updated.
+- Albums, and the album and artists of a song, come from spclient's
+  extended metadata.
 
 ## Building
 

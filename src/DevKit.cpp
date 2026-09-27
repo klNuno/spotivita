@@ -293,12 +293,15 @@ void serve(int fd) {
             auto res = std::make_shared<ApiResult>();
             auto done = std::make_shared<bool>(false);
             g_gui->net.post([path, ctype, body, res, done] {
-                // "{user}" stands for the signed-in username.
+                // "{user}" stands for the signed-in username; the path
+                // "/pathfinder" posts the body to the web player's GraphQL.
                 std::string p = path;
                 size_t at = p.find("{user}");
                 if (at != std::string::npos) p.replace(at, 6, g_gui->api.user());
-                ApiResult r = g_gui->api.raw(p, body.empty() ? nullptr : &body,
-                                             ctype.empty() ? nullptr : ctype.c_str());
+                ApiResult r = p == "/pathfinder"
+                    ? g_gui->api.pathfinder(body)
+                    : g_gui->api.raw(p, body.empty() ? nullptr : &body,
+                                     ctype.empty() ? nullptr : ctype.c_str());
                 std::lock_guard<std::mutex> lk(g_mutex);
                 *res = r;
                 *done = true;

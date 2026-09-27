@@ -1,9 +1,11 @@
 #include "API.h"
 #include "Utils.h"
+#include "Proto.h"
 #include <Logger.h>
 #include <psp2/kernel/processmgr.h>
 #include "Config.h"
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -26,12 +28,20 @@ static std::string urlencode(const std::string& s) {
     return out;
 }
 
-// JSON string literal body for the small player payloads we build by hand.
+// JSON string literal for the request bodies built by hand.
 static std::string jsonString(const std::string& s) {
     std::string out = "\"";
     for (char c : s) {
-        if (c == '"' || c == '\\') out += '\\';
-        out += c;
+        if (c == '"' || c == '\\') {
+            out += '\\';
+            out += c;
+        } else if (static_cast<unsigned char>(c) < 0x20) {
+            char esc[8];
+            snprintf(esc, sizeof(esc), "\\u%04x", static_cast<unsigned char>(c));
+            out += esc;
+        } else {
+            out += c;
+        }
     }
     out += '"';
     return out;
@@ -64,6 +74,23 @@ std::string spotify_base62_to_hex(const std::string &id) {
         out += hex[b & 0x0F];
     }
     return out;
+}
+
+std::string spotify_hex_to_base62(const std::string &hex) {
+    if (hex.size() != 32) {
+        return "";
+    }
+    std::string bytes;
+    for (size_t i = 0; i < 32; i += 2) {
+        char pair[3] = {hex[i], hex[i + 1], 0};
+        char *end = NULL;
+        long v = strtol(pair, &end, 16);
+        if (end != pair + 2) {
+            return "";
+        }
+        bytes += static_cast<char>(v);
+    }
+    return gid_to_base62(bytes);
 }
 
 void API::set_token(const std::string &token, int expiresInS) {
@@ -251,16 +278,16 @@ ApiResult API::get_playlist(const std::string &playlistId) {
     return spclient(SPCLIENT_BASE "/playlist/v2/playlist/" + playlistId);
 }
 
-// Many tracks in one request, the way the official clients load a list:
+// Many entities in one request, the way the official clients load a list:
 // extended-metadata BatchedEntityRequest { entity_request=2 { entity_uri=1,
-// query=2 { extension_kind=1: TRACK_V4 = 10 } } }. The answer carries one
-// metadata Track per URI, in any order.
-ApiResult API::get_tracks_metadata(const std::vector<std::string> &uris) {
+// query=2 { extension_kind=1 } } }. The answer carries one message per URI,
+// in any order.
+ApiResult API::get_extended(const std::vector<std::string> &uris, int kind) {
     std::string body;
     for (const auto &uri : uris) {
         std::string query;
         pbPutVarint(&query, (1 << 3) | 0);
-        pbPutVarint(&query, 10);
+        pbPutVarint(&query, static_cast<uint64_t>(kind));
         std::string request;
         pbPutString(&request, 1, uri);
         pbPutString(&request, 2, query);
@@ -280,18 +307,47 @@ ApiResult API::get_track_metadata(const std::string &trackId) {
                     "application/x-protobuf");
 }
 
+static std::string pathfinderBody(const char *operation, const char *hash, const std::string &variables) {
+    return "{\"variables\":" + variables + ",\"operationName\":\"" + operation +
+           "\",\"extensions\":{\"persistedQuery\":{\"version\":1,\"sha256Hash\":\"" + hash + "\"}}}";
+}
+
 // Search through the web player's GraphQL endpoint (pathfinder): the public
-// /v1/search answers 429 to this client_id. The persisted-query hash comes
-// from the web player bundle (xpui-routes-search chunk); Spotify can rotate
-// it, and then search fails until SEARCH_TRACKS_HASH is refreshed.
-ApiResult API::search(const std::string &query, uint16_t limit) {
-    std::string body =
-        "{\"variables\":{\"searchTerm\":" + jsonString(query) +
-        ",\"offset\":0,\"limit\":" + std::to_string(limit) +
+// /v1/search answers 429 to this client_id. One category per request, so
+// each can page on its own.
+ApiResult API::search(int kind, const std::string &query, int offset, int limit) {
+    static const struct { const char *operation, *hash; } kOps[] = {
+        {"searchTracks", PF_SEARCH_TRACKS}, {"searchArtists", PF_SEARCH_ARTISTS},
+        {"searchAlbums", PF_SEARCH_ALBUMS}, {"searchPlaylists", PF_SEARCH_PLAYLISTS},
+    };
+    if (kind < 0 || kind > 3) return ApiResult();
+    std::string vars =
+        "{\"searchTerm\":" + jsonString(query) + ",\"offset\":" + std::to_string(offset) +
+        ",\"limit\":" + std::to_string(limit) +
         ",\"numberOfTopResults\":5,\"includeAudiobooks\":false,\"includePreReleases\":false"
         ",\"includeAlbumPreReleases\":false,\"includeAuthors\":false"
-        ",\"includeEpisodeContentRatingsV2\":false},"
-        "\"operationName\":\"searchTracks\","
-        "\"extensions\":{\"persistedQuery\":{\"version\":1,\"sha256Hash\":\"" SEARCH_TRACKS_HASH "\"}}}";
-    return web("POST", PATHFINDER_URL, body);
+        ",\"includeEpisodeContentRatingsV2\":false}";
+    return pathfinder(pathfinderBody(kOps[kind].operation, kOps[kind].hash, vars));
+}
+
+// Everything the artist page shows in one answer (about 100 KB): profile,
+// top tracks, the first releases of each kind, related artists.
+ApiResult API::artist_overview(const std::string &uri) {
+    std::string vars = "{\"uri\":" + jsonString(uri) + ",\"locale\":\"\",\"includePrerelease\":false}";
+    return pathfinder(pathfinderBody("queryArtistOverview", PF_ARTIST_OVERVIEW, vars));
+}
+
+ApiResult API::artist_releases(const std::string &uri, int section, int offset, int limit) {
+    static const char *kOps[] = {
+        "queryArtistDiscographyAlbums", "queryArtistDiscographySingles",
+        "queryArtistDiscographyCompilations",
+    };
+    std::string vars = "{\"uri\":" + jsonString(uri) + ",\"offset\":" + std::to_string(offset) +
+                       ",\"limit\":" + std::to_string(limit);
+    if (section == 4) {
+        return pathfinder(pathfinderBody("queryArtistAppearsOn", PF_ARTIST_APPEARS_ON, vars + "}"));
+    }
+    if (section < 1 || section > 3) return ApiResult();
+    return pathfinder(pathfinderBody(kOps[section - 1], PF_ARTIST_DISCOGRAPHY,
+                                     vars + ",\"order\":\"DATE_DESC\"}"));
 }

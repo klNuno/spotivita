@@ -370,6 +370,7 @@ void SpircController::setEventHandler(cspotEventHandler callback) {
             info.imageUrl = track.imageUrl;
             info.name = track.name;
             info.duration = track.duration;
+            info.gid = track.gid;
             this->sendEvent(CSpotEventType::TRACK_INFO, info);
     });
 }

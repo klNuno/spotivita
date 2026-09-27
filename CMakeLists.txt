@@ -37,6 +37,13 @@ foreach(_sym pthread_cancel pthread_once pthread_cond_wait pthread_cond_timedwai
   set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--undefined=${_sym}")
 endforeach()
 
+# vita-elf-create appends about 3 KB of SCE tables (module info, imports) to the
+# end of the text segment. The data segment starts at the next 64 KB boundary,
+# so a text segment ending less than that before it made vita-elf-create
+# overlap the two (heap corruption, or "Cannot allocate ... segment overlaps"
+# in newer versions). vitasdk's linker script adds __sce_headroom bytes there.
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--defsym=__sce_headroom=0x2000")
+
 # --- Patch the pinned cspot/bell submodule for the Vita toolchain ---------
 # The cspot submodule is pinned at an old commit; these overrides are applied
 # in-place at configure time so the checkout itself stays otherwise clean.
@@ -100,6 +107,9 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/SpircController.cpp
 # of stalling silently when a track lacks the configured one.
 file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/SpotifyTrack.cpp
      DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/src)
+# TrackInfo carries the track gid, so the app can open its album and artists.
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/patch/SpotifyTrack.h
+     DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/cspot/cspot/include)
 # A reconnect fails every pending audio chunk. Upstream kept reading the failed
 # chunk in a busy loop (silence, controls starved); these re-request it, end an
 # unreadable stream like a finished track, and lock currentTrack, which the
@@ -167,6 +177,11 @@ add_executable(${PROJECT_NAME}
   src/NetWorker.cpp
   src/ConnectWatch.cpp
   src/DevKit.cpp
+  src/Proto.cpp
+  src/Catalog.cpp
+  src/Thumbs.cpp
+  src/Widgets.cpp
+  src/Browse.cpp
   src/Compat.c
 )
 

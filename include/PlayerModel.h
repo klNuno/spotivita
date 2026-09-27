@@ -16,8 +16,9 @@ class PlayerModel {
  public:
     void setTrack(const std::string& name, const std::string& album,
                   const std::string& artist, const std::string& imageUrl,
-                  int durationMs) {
+                  int durationMs, const std::string& uri) {
         std::lock_guard<std::mutex> g(mutex_);
+        uri_ = uri;
         name_ = name;
         album_ = album;
         artist_ = artist;
@@ -56,6 +57,7 @@ class PlayerModel {
 
     struct Snapshot {
         std::string name, album, artist, imageUrl;
+        std::string uri;          // spotify:track:<id>, "" for an episode
         int durationMs = 0;
         int positionMs = 0;
         bool paused = true;
@@ -67,6 +69,7 @@ class PlayerModel {
         std::lock_guard<std::mutex> g(mutex_);
         Snapshot s;
         s.name = name_;
+        s.uri = uri_;
         s.album = album_;
         s.artist = artist_;
         s.imageUrl = imageUrl_;
@@ -93,6 +96,7 @@ class PlayerModel {
 
     std::mutex mutex_;
     std::string name_ = "Not playing";
+    std::string uri_;
     std::string album_;
     std::string artist_;
     std::string imageUrl_;

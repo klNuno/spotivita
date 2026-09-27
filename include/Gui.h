@@ -43,6 +43,9 @@ class GUI {
     // Spotify HTTP API (used from the net worker only) and the worker itself.
     API api;
     NetWorker net;
+    // Covers and avatars of lists, on their own thread so a page of
+    // thumbnails never delays a tap on play.
+    NetWorker images;
     // What the account plays on its other devices (dealer websocket thread).
     ConnectWatch connect{&api};
 

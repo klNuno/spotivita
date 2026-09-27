@@ -187,8 +187,9 @@ int start_cspot(SceSize _args, void *_argp) {
             switch (event.eventType) {
                 case CSpotEventType::TRACK_INFO:
                     if (auto t = std::get_if<TrackInfo>(&event.data)) {
-                        gui->player.setTrack(t->name, t->album, t->artist,
-                                             t->imageUrl, t->duration);
+                        std::string id = spotify_hex_to_base62(t->gid);
+                        gui->player.setTrack(t->name, t->album, t->artist, t->imageUrl, t->duration,
+                                             id.empty() ? std::string() : "spotify:track:" + id);
                     }
                     break;
                 case CSpotEventType::PLAY_PAUSE:
