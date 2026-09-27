@@ -54,6 +54,9 @@ bool loopback_mode();
 // cancellation through the calling thread's pthread record, which a raw
 // sceKernelCreateThread thread does not have (NULL write, then a crash).
 bool start_pthread(void *(*fn)(void *), void *arg, size_t stack_size);
+// Same user agent and TLS checks as download(), for a curl handle made
+// elsewhere (the dealer websocket).
+void curl_apply_tls(void *curlHandle);
 // *status (optional) receives the HTTP status, or 0 when the transfer itself
 // failed (DNS, TLS, timeout).
 int download(const char *url, uint8_t **return_buffer, const char *method = "GET",

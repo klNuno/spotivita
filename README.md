@@ -40,6 +40,11 @@ network layer.
 - A black background, which turns the pixels off on the OLED model.
 - Spotify Connect: the Vita shows up in the device list of the Spotify app, so
   your phone can drive it too.
+- One device plays at a time, like Spotify. Start a song on your phone and the
+  Vita pauses; start one on the Vita and the phone pauses.
+- While another device plays, the Vita shows its song and drives it: play,
+  pause, next, previous, seek and volume. "Play here" moves the playback to the
+  Vita, at the same spot.
 - Background playback: press the PS button and the music keeps going, screen
   off included. The interface stops drawing while it is in the background.
 - No `libshacccg.suprx` needed. It draws with vita2d and precompiled shaders.
@@ -51,8 +56,9 @@ there is checked by watching the position move. The vita2d build plays,
 searches and runs in the background on a real PS Vita. A dropped connection
 to Spotify used to leave the player silent and deaf to pause; the stream now
 asks for the lost audio again after the reconnect. That fix has not been
-through a real disconnect yet. If something breaks on your Vita, please open
-an issue.
+through a real disconnect yet. The handover between the Vita and another
+device has only run against a simulated phone so far. If something breaks
+on your Vita, please open an issue.
 
 ## Install
 

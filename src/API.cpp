@@ -160,6 +160,35 @@ ApiResult API::spclient(const std::string &url, const char *accept,
     return r;
 }
 
+ApiResult API::connect_state(const char *method, const std::string &path, const std::string &body,
+                             const std::string &connectionId) {
+    ApiResult r;
+    if (!has_token()) {
+        return r;
+    }
+    for (int attempt = 0; attempt < 2; attempt++) {
+        Headers headers = { "Accept: application/json",
+                            "Content-Type: application/json",
+                            "Authorization: Bearer " + bearer(attempt > 0) };
+        if (!connectionId.empty()) {
+            headers.push_back("X-Spotify-Connection-Id: " + connectionId);
+        }
+        uint8_t *buf = NULL;
+        std::string url = SPCLIENT_BASE "/connect-state/v1/" + path;
+        int len = download(url.c_str(), &buf, method, body, headers, &r.status);
+        r.body.assign(buf != NULL ? reinterpret_cast<const char *>(buf) : "",
+                      (buf != NULL && len > 0) ? static_cast<size_t>(len) : 0);
+        free(buf);
+        if (r.status != 401) {
+            break;
+        }
+    }
+    if (!r.ok()) {
+        CSPOT_LOG(error, "connect-state %s %s -> %ld", method, path.c_str(), r.status);
+    }
+    return r;
+}
+
 std::string API::user() const {
     std::lock_guard<std::mutex> g(mutex_);
     return user_;

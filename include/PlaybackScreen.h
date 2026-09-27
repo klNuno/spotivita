@@ -10,6 +10,7 @@
 #include <vector>
 #include "Screen.h"
 #include "PlayerModel.h"
+#include "ConnectWatch.h"
 
 enum class LoadState { NONE, LOADING, LOADED, FAILED };
 
@@ -51,6 +52,13 @@ struct Folder {
 struct LibraryEntry {
     bool isFolder;
     int index;            // into folders or playlists
+};
+
+// Metadata of the track another device plays (the cluster carries only its
+// URI when the device is a Spotify Connect speaker).
+struct RemoteTrack {
+    std::string uri, name, artist, album, imageUrl;
+    int durationMs = 0;
 };
 
 struct SearchTrack {
@@ -95,6 +103,8 @@ class PlaybackScreen: public Screen {
 
     // Previous restarts the track past its first seconds, like Spotify.
     void previous(const PlayerModel::Snapshot& snap);
+    void togglePlay(const PlayerModel::Snapshot& snap);
+    void skipNext();
     // Leaves the open playlist, then the open folder. False at the top.
     bool goBack();
 
@@ -121,6 +131,18 @@ class PlaybackScreen: public Screen {
     void sendWindow(size_t start);
     void continueQueue();
     void locateCurrent(const PlayerModel::Snapshot& snap);
+    // Spotify Connect. Only one device of the account plays: the one started
+    // last wins and the other pauses. While another device is active and this
+    // one is not playing, its track fills the now-playing pane and the
+    // transport drives it.
+    void tickConnect(const PlayerModel::Snapshot& local);
+    bool otherActive() const;
+    bool remoteShown(const PlayerModel::Snapshot& local) const;
+    PlayerModel::Snapshot remoteSnapshot() const;
+    void remoteCommand(const std::string &endpoint, int64_t valueMs = -1);
+    void fetchRemoteTrack(const std::string &uri);
+    void playHere();
+    void drawRemoteBar(float paneW);
     void sendSeek(int ms);
     void sendShuffle(bool on);
     void sendRepeat(int mode);
@@ -169,6 +191,21 @@ class PlaybackScreen: public Screen {
     std::vector<std::string> queueUris;
     size_t queueNext = 0;          // first index not sent to cspot yet
     unsigned int shuffleSeed = 1;  // rand_r state: cspot's thread uses rand()
+
+    // Last cluster from ConnectWatch (a tap on the remote transport edits it
+    // until the next one) and the metadata of the track it names.
+    ConnectState remote;
+    unsigned connectVersion = 0;
+    RemoteTrack remoteTrack;
+    bool remoteMode = false;       // the pane shows the other device this frame
+    // Who started playing last, in process time: another device (a cluster
+    // named it active and playing) or this Vita (its player left pause).
+    std::string otherPlayingId;
+    uint64_t remoteStartUs = 0;
+    uint64_t localStartUs = 0;
+    bool localWasPlaying = false;
+    uint64_t handledRemoteStart = 0;   // takeover already paused this Vita
+    uint64_t handledLocalStart = 0;    // the other device was already paused
 
     // Sleep timer: pause at sleepAtUs (process time), or when the track
     // named sleepTrack ends.

@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include "API.h"
+#include "ConnectWatch.h"
 #include "NetWorker.h"
 #include "PlayerModel.h"
 #include "Screen.h"
@@ -42,6 +43,8 @@ class GUI {
     // Spotify HTTP API (used from the net worker only) and the worker itself.
     API api;
     NetWorker net;
+    // What the account plays on its other devices (dealer websocket thread).
+    ConnectWatch connect{&api};
 
     // Shared playback state (cspot worker writes, GUI thread reads).
     PlayerModel player;
@@ -53,6 +56,7 @@ class GUI {
     std::function<void()> prevCallback = []() {};
     std::function<void()> playToggleCallback = []() {};
     std::function<void()> pauseCallback = []() {};
+    std::function<void()> yieldCallback = []() {};    // another device took over
     std::function<void(int)> volumeCallback = [](int) {};  // 0..65535
     // Local playback: track URIs, context URI, start index, and whether the
     // list goes on past these tracks (cspot then sets queueEnded at their end).

@@ -66,6 +66,14 @@ class API {
     // pathfinder GraphQL searchTracks, JSON.
     ApiResult search(const std::string &query, uint16_t limit);
 
+    // The current token, refreshed when it expired (blocking).
+    std::string access_token() { return bearer(false); }
+
+    // spclient connect-state, JSON, from any thread (a fresh connection per
+    // call). connectionId is the dealer websocket's Spotify-Connection-Id.
+    ApiResult connect_state(const char *method, const std::string &path, const std::string &body,
+                            const std::string &connectionId);
+
     // Any spclient path (devkit exploration): POST when body is set.
     ApiResult raw(const std::string &path, const std::string *body, const char *contentType) {
         return spclient(SPCLIENT_BASE + path, nullptr, body, contentType);

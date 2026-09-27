@@ -109,6 +109,15 @@ static long verify_host_level() {
     return level;
 }
 
+void curl_apply_tls(void *handle) {
+    CURL *h = static_cast<CURL *>(handle);
+    curl_easy_setopt(h, CURLOPT_USERAGENT, USER_AGENT);
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, verify_host_level());
+    curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(h, CURLOPT_CAINFO, TLS_CA_BUNDLE);
+    curl_easy_setopt(h, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+}
+
 int download(const char *url, uint8_t **return_buffer, const char *method, std::string post_data, Headers headers,
              long *status) {
     CURL *curl_handle;

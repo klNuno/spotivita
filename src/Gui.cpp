@@ -149,6 +149,14 @@ void GUI::init() {
         0xf074, 0xf074,  // random (shuffle play)
         0xf160, 0xf161,  // sort amount down/up
         0xf186, 0xf186,  // moon (sleep timer)
+        // Spotify Connect device types
+        0xf108, 0xf109,  // desktop, laptop
+        0xf11b, 0xf11b,  // gamepad
+        0xf1b9, 0xf1b9,  // car
+        0xf26c, 0xf26c,  // tv
+        0xf3cd, 0xf3cd,  // mobile
+        0xf3fa, 0xf3fa,  // tablet
+        0xf519, 0xf519,  // broadcast tower (other)
         0,
     };
     small_icon_font = io.Fonts->AddFontFromFileTTF(FONT_ICON_FILE_NAME_FAS, 24.0f, NULL, small_ranges);
@@ -210,6 +218,7 @@ std::string GUI::debugState() {
         ",\"duration_ms\":" + std::to_string(snap.durationMs) +
         ",\"paused\":" + (snap.paused ? "true" : "false") +
         ",\"volume\":" + std::to_string(snap.volume) + "}" +
+        ",\"connect\":" + connect.debugJson() +
         ",\"view\":" + (current ? current->debugState() : std::string("{}")) + "}";
     return out;
 }

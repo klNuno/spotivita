@@ -74,6 +74,9 @@ const size_t QUEUE_MAX = 100;
 const size_t QUEUE_BEFORE = 10;
 // Previous restarts the track past this point, like Spotify.
 const int PREV_RESTART_MS = 3000;
+// This Vita started playing last, yet the other device still plays after this
+// long: Spotify did not stop it, so the app asks it to pause.
+const uint64_t TAKEOVER_GRACE_US = 4000000ULL;
 
 const char *START_GROUP = "spotify:start-group:";
 const char *END_GROUP = "spotify:end-group:";
@@ -249,6 +252,18 @@ bool pillButton(const char *label, ImVec2 size, ImU32 bg, ImU32 fg) {
     ImGui::PopStyleVar();
     ImGui::PopStyleColor(3);
     return r;
+}
+
+// Font Awesome glyph for a Spotify Connect device type.
+const char *deviceIcon(const std::string &type) {
+    if (type == "SMARTPHONE") return ICON_FA_MOBILE_ALT;
+    if (type == "TABLET") return ICON_FA_TABLET_ALT;
+    if (type == "COMPUTER" || type == "CHROMEBOOK") return ICON_FA_LAPTOP;
+    if (type == "TV" || type == "STB" || type == "CAST_VIDEO") return ICON_FA_TV;
+    if (type == "GAME_CONSOLE") return ICON_FA_GAMEPAD;
+    if (type == "AUTOMOBILE") return ICON_FA_CAR;
+    if (type == "SPEAKER" || type == "CAST_AUDIO" || type == "AUDIO_DONGLE") return ICON_FA_VOLUME_UP;
+    return ICON_FA_BROADCAST_TOWER;
 }
 
 std::string fmtTime(int ms) {
@@ -672,18 +687,38 @@ std::string parseListName(const std::string &body) {
 
 struct TrackMeta {
     std::string name, artist, album;
+    std::string coverUrl;   // album cover, "" if none
     int durationMs = 0;
 };
 
-// metadata Track: name=2, album=3 { name=2 }, artist=4 { name=2 }, duration=7.
+// metadata Track: name=2, album=3 { name=2, cover_group=17 { image=1 {
+// file_id=1, size=2 } } }, artist=4 { name=2 }, duration=7.
 TrackMeta parseTrackMeta(const uint8_t *data, const uint8_t *end) {
     TrackMeta m;
     auto n = pbLenFields(data, end, 2);
     if (!n.empty()) m.name = pbString(n[0]);
     auto album = pbLenFields(data, end, 3);
     if (!album.empty()) {
-        auto an = pbLenFields(album[0].first, album[0].first + album[0].second, 2);
+        const uint8_t *ab = album[0].first, *ae = album[0].first + album[0].second;
+        auto an = pbLenFields(ab, ae, 2);
         if (!an.empty()) m.album = pbString(an[0]);
+        // The default size (0, about 300 px) suits the pane; else the first.
+        auto group = pbLenFields(ab, ae, 17);
+        std::string fileId;
+        for (auto &img : group.empty() ? decltype(group)() : pbLenFields(group[0].first,
+                                                                          group[0].first + group[0].second, 1)) {
+            auto id = pbLenFields(img.first, img.first + img.second, 1);
+            if (id.empty()) continue;
+            bool isDefault = pbVarintField(img.first, img.first + img.second, 2) == 0;
+            if (fileId.empty() || isDefault) fileId = pbString(id[0]);
+            if (isDefault) break;
+        }
+        static const char *hex = "0123456789abcdef";
+        for (unsigned char c : fileId) {
+            if (m.coverUrl.empty()) m.coverUrl = "https://i.scdn.co/image/";
+            m.coverUrl += hex[c >> 4];
+            m.coverUrl += hex[c & 0x0F];
+        }
     }
     for (auto &a : pbLenFields(data, end, 4)) {
         auto an = pbLenFields(a.first, a.first + a.second, 2);
@@ -938,6 +973,7 @@ PlaybackScreen::~PlaybackScreen() {
 
 void PlaybackScreen::tick() {
     PlayerModel::Snapshot snap = gui->player.snapshot();
+    if (remoteShown(snap)) snap = remoteSnapshot();
     if (!snap.imageUrl.empty() && snap.imageUrl != coverUrl) {
         fetchCover(snap.imageUrl);
     }
@@ -954,8 +990,9 @@ void PlaybackScreen::tickPlayback() {
     if (gui->queueEnded.exchange(false)) {
         continueQueue();
     }
-    if (sleepAtUs == 0 && !sleepEndOfTrack) return;
     PlayerModel::Snapshot snap = gui->player.snapshot();
+    tickConnect(snap);
+    if (sleepAtUs == 0 && !sleepEndOfTrack) return;
     bool due = sleepAtUs != 0 && sceKernelGetProcessTimeWide() >= sleepAtUs;
     // End of track: just before it ends, or once another one took its place
     // (a skip, or a tick that came too late).
@@ -1532,14 +1569,179 @@ void PlaybackScreen::sendRepeat(int mode) {
     gui->repeatCallback(mode);
 }
 
+// ---------------------------------------------------------------- connect
+
+bool PlaybackScreen::otherActive() const {
+    return remote.valid && !remote.activeId.empty() && remote.activeId != DEVICE_ID;
+}
+
+bool PlaybackScreen::remoteShown(const PlayerModel::Snapshot& local) const {
+    return otherActive() && local.paused && !local.loading;
+}
+
+void PlaybackScreen::tickConnect(const PlayerModel::Snapshot& local) {
+    uint64_t now = sceKernelGetProcessTimeWide();
+    bool localPlaying = !local.paused && !local.loading && local.durationMs > 0;
+    if (localPlaying && !localWasPlaying) localStartUs = now;
+    localWasPlaying = localPlaying;
+
+    ConnectState s = gui->connect.snapshot();
+    if (s.version != connectVersion) {
+        connectVersion = s.version;
+        remote = s;
+        // A device starts playing when a cluster first names it active and
+        // playing; later clusters about the same playback change nothing.
+        std::string playing = s.playing && otherActive() ? s.activeId : "";
+        if (!playing.empty() && playing != otherPlayingId) remoteStartUs = now;
+        otherPlayingId = playing;
+        if (otherActive() && startsWith(s.trackUri, "spotify:track:") && s.trackUri != remoteTrack.uri) {
+            fetchRemoteTrack(s.trackUri);
+        }
+    }
+    if (!localPlaying || !otherActive() || !remote.playing) return;
+    if (remoteStartUs > localStartUs) {
+        // The other device started last: this one steps aside, like Spotify.
+        if (handledRemoteStart == remoteStartUs) return;
+        handledRemoteStart = remoteStartUs;
+        gui->yieldCallback();
+        gui->toast("Playing on " + remote.deviceName + ", paused here.");
+    } else if (now - localStartUs > TAKEOVER_GRACE_US && handledLocalStart != localStartUs) {
+        handledLocalStart = localStartUs;
+        remoteCommand("pause");
+        gui->toast("Paused " + remote.deviceName + ".");
+    }
+}
+
+// The pane for the other device: the cluster's metadata when it has some,
+// else what fetchRemoteTrack found for its URI.
+PlayerModel::Snapshot PlaybackScreen::remoteSnapshot() const {
+    PlayerModel::Snapshot s;
+    bool meta = remoteTrack.uri == remote.trackUri;
+    s.name = !remote.title.empty() ? remote.title : (meta ? remoteTrack.name : "");
+    s.artist = !remote.artist.empty() ? remote.artist : (meta ? remoteTrack.artist : "");
+    s.album = meta ? remoteTrack.album : "";
+    s.imageUrl = !remote.imageUrl.empty() ? remote.imageUrl : (meta ? remoteTrack.imageUrl : "");
+    s.durationMs = remote.durationMs > 0 ? remote.durationMs : (meta ? remoteTrack.durationMs : 0);
+    int64_t pos = remote.positionMs;
+    if (remote.playing) pos += static_cast<int64_t>((sceKernelGetProcessTimeWide() - remote.receivedAtUs) / 1000);
+    if (s.durationMs > 0 && pos > s.durationMs) pos = s.durationMs;
+    s.positionMs = pos < 0 ? 0 : static_cast<int>(pos);
+    s.paused = !remote.playing;
+    s.volume = remote.volume >= 0 ? remote.volume : gui->player.snapshot().volume;
+    return s;
+}
+
+void PlaybackScreen::fetchRemoteTrack(const std::string &uri) {
+    remoteTrack = RemoteTrack();
+    remoteTrack.uri = uri;
+    GUI *g = gui;
+    gui->net.post([this, g, uri] {
+        ApiResult m = g->api.get_tracks_metadata({uri});
+        std::map<std::string, TrackMeta> metas;
+        if (m.ok()) parseExtendedMetadata(m.body, &metas);
+        auto it = metas.find(uri);
+        if (it == metas.end()) return;
+        TrackMeta t = it->second;
+        g->net.deliver([this, uri, t] {
+            if (remoteTrack.uri != uri) return;
+            remoteTrack.name = t.name;
+            remoteTrack.artist = t.artist;
+            remoteTrack.album = t.album;
+            remoteTrack.imageUrl = t.coverUrl;
+            remoteTrack.durationMs = t.durationMs;
+        });
+    }, true);
+}
+
+// Sent to the device the pane shows. The local copy of the cluster moves at
+// once, so the button and the clock answer before Spotify does.
+void PlaybackScreen::remoteCommand(const std::string &endpoint, int64_t valueMs) {
+    if (!otherActive()) return;
+    uint64_t now = sceKernelGetProcessTimeWide();
+    if (endpoint == "pause" || endpoint == "resume" || endpoint == "seek_to") {
+        int64_t pos = remote.positionMs;
+        if (remote.playing) pos += static_cast<int64_t>((now - remote.receivedAtUs) / 1000);
+        remote.positionMs = endpoint == "seek_to" ? valueMs : pos;
+        remote.receivedAtUs = now;
+        if (endpoint != "seek_to") remote.playing = endpoint == "resume";
+        if (endpoint == "resume") remoteStartUs = now;
+    }
+    std::string target = remote.activeId, name = remote.deviceName;
+    GUI *g = gui;
+    gui->net.post([g, target, name, endpoint, valueMs] {
+        if (g->connect.command(target, endpoint, valueMs)) return;
+        g->net.deliver([g, name] { g->toast("Could not reach " + name + "."); });
+    }, true);
+}
+
+// Moves the other device's playback to this Vita (Spotify sends cspot a load
+// frame with its queue and position).
+void PlaybackScreen::playHere() {
+    if (!otherActive()) return;
+    std::string name = remote.deviceName;
+    GUI *g = gui;
+    gui->net.post([g, name] {
+        if (g->connect.transfer(DEVICE_ID)) return;
+        g->net.deliver([g, name] { g->toast("Could not take playback from " + name + "."); });
+    }, true);
+    gui->toast("Moving playback here.");
+}
+
+// "Playing on <device>" at the bottom of the pane, with a button that brings
+// the playback here.
+void PlaybackScreen::drawRemoteBar(float paneW) {
+    float h = 40.0f;
+    float y = ImGui::GetWindowHeight() - h - 8.0f;
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    ImVec2 wp = ImGui::GetWindowPos();
+    dl->AddRectFilled(ImVec2(wp.x + 8.0f, wp.y + y), ImVec2(wp.x + paneW - 8.0f, wp.y + y + h),
+                      COL_CARD, 8.0f);
+    ImFont *icon = gui->small_icon_font;
+    dl->AddText(icon, icon->FontSize, ImVec2(wp.x + 18.0f, wp.y + y + (h - icon->FontSize) * 0.5f),
+                COL_GREENV, deviceIcon(remote.deviceType));
+    float pillW = 112.0f;
+    std::string label = (remote.playing ? "Playing on " : "Paused on ") + remote.deviceName;
+    ImFont *f = gui->log_font;
+    label = fitText(f, label, paneW - pillW - 72.0f);
+    dl->AddText(f, f->FontSize, ImVec2(wp.x + 52.0f, wp.y + y + (h - f->FontSize) * 0.5f),
+                COL_GREENV, label.c_str());
+    ImGui::SetCursorPos(ImVec2(paneW - pillW - 14.0f, y + 5.0f));
+    ImGui::PushFont(f);
+    if (pillButton("Play here##connect", ImVec2(pillW, h - 10.0f), COL_GREENV, COL_DARK)) playHere();
+    ImGui::PopFont();
+}
+
 // ---------------------------------------------------------------- drawing
 
 void PlaybackScreen::previous(const PlayerModel::Snapshot& snap) {
-    if (snap.positionMs > PREV_RESTART_MS && snap.durationMs > 0) {
+    bool restart = snap.positionMs > PREV_RESTART_MS && snap.durationMs > 0;
+    if (remoteMode) {
+        if (restart) {
+            remoteCommand("seek_to", 0);
+        } else {
+            remoteCommand("skip_prev");
+        }
+    } else if (restart) {
         gui->player.setPosition(0);
         sendSeek(0);
     } else {
         gui->prevCallback();
+    }
+}
+
+void PlaybackScreen::togglePlay(const PlayerModel::Snapshot& snap) {
+    if (remoteMode) {
+        remoteCommand(snap.paused ? "resume" : "pause");
+    } else {
+        gui->playToggleCallback();
+    }
+}
+
+void PlaybackScreen::skipNext() {
+    if (remoteMode) {
+        remoteCommand("skip_next");
+    } else {
+        gui->nextCallback();
     }
 }
 
@@ -1621,8 +1823,12 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
         scrubbing = false;
         int ms = static_cast<int>(scrubFrac * snap.durationMs);
         if (ms < 0) ms = 0;
-        gui->player.setPosition(ms);   // instant local feedback
-        sendSeek(ms);
+        if (remoteMode) {
+            remoteCommand("seek_to", ms);
+        } else {
+            gui->player.setPosition(ms);   // instant local feedback
+            sendSeek(ms);
+        }
     }
 
     int shownMs = scrubbing ? static_cast<int>(scrubFrac * snap.durationMs) : snap.positionMs;
@@ -1663,9 +1869,18 @@ void PlaybackScreen::drawNowPlaying(const PlayerModel::Snapshot& snap) {
     } else if (volSliding) {
         volSliding = false;
         int v = static_cast<int>(volSlideFrac * 65535.0f);
-        gui->player.setVolume(v);   // instant local feedback
-        gui->volumeCallback(v);
+        if (remoteMode) {
+            remote.volume = v;
+            std::string target = remote.activeId;
+            GUI *g = gui;
+            gui->net.post([g, target, v] { g->connect.setVolume(target, v); }, true);
+        } else {
+            gui->player.setVolume(v);   // instant local feedback
+            gui->volumeCallback(v);
+        }
     }
+
+    if (remoteMode) drawRemoteBar(paneW);
 }
 
 // Spotify order: shuffle / prev / play / next / repeat. While a track loads the
@@ -1678,7 +1893,8 @@ void PlaybackScreen::drawTransport(const PlayerModel::Snapshot& snap) {
     bool ready = gui->cspot_started;
     ImGui::PushFont(gui->icon_font);
     if (iconButton(ICON_FA_RANDOM "##shuffle", ImVec2(52.0f, 64.0f),
-                   shuffleOn ? COL_GREENV : COL_GREY, COL_CLEAR) && ready) {
+                   remoteMode ? COL_DIM : (shuffleOn ? COL_GREENV : COL_GREY), COL_CLEAR) &&
+        ready && !remoteMode) {
         shuffleOn = !shuffleOn;
         sendShuffle(shuffleOn);
         // cspot shuffles the window it holds; the rest of a long list here.
@@ -1690,7 +1906,8 @@ void PlaybackScreen::drawTransport(const PlayerModel::Snapshot& snap) {
         }
     }
     ImGui::SameLine();
-    if (iconButton(ICON_FA_STEP_BACKWARD "##prev", ImVec2(64.0f, 64.0f), COL_WHITE, COL_CLEAR) && ready) {
+    if (iconButton(ICON_FA_STEP_BACKWARD "##prev", ImVec2(64.0f, 64.0f), COL_WHITE, COL_CLEAR) &&
+        (ready || remoteMode)) {
         previous(snap);
     }
     ImGui::PopFont();
@@ -1698,8 +1915,9 @@ void PlaybackScreen::drawTransport(const PlayerModel::Snapshot& snap) {
 
     ImGui::PushFont(gui->playback_icon_font);
     const char* playIcon = snap.paused ? ICON_FA_PLAY_CIRCLE "###pp" : ICON_FA_PAUSE_CIRCLE "###pp";  // NOLINT
-    if (iconButton(playIcon, ImVec2(72.0f, 64.0f), snap.loading ? COL_GREY : COL_WHITE, COL_CLEAR) && ready) {
-        gui->playToggleCallback();
+    if (iconButton(playIcon, ImVec2(72.0f, 64.0f), snap.loading ? COL_GREY : COL_WHITE, COL_CLEAR) &&
+        (ready || remoteMode)) {
+        togglePlay(snap);
     }
     if (snap.loading) {
         ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
@@ -1714,12 +1932,14 @@ void PlaybackScreen::drawTransport(const PlayerModel::Snapshot& snap) {
     ImGui::SameLine();
 
     ImGui::PushFont(gui->icon_font);
-    if (iconButton(ICON_FA_STEP_FORWARD "##next", ImVec2(64.0f, 64.0f), COL_WHITE, COL_CLEAR) && ready) {
-        gui->nextCallback();
+    if (iconButton(ICON_FA_STEP_FORWARD "##next", ImVec2(64.0f, 64.0f), COL_WHITE, COL_CLEAR) &&
+        (ready || remoteMode)) {
+        skipNext();
     }
     ImGui::SameLine();
     if (iconButton(ICON_FA_REDO "##repeat", ImVec2(52.0f, 64.0f),
-                   repeatMode != 0 ? COL_GREENV : COL_GREY, COL_CLEAR) && ready) {
+                   remoteMode ? COL_DIM : (repeatMode != 0 ? COL_GREENV : COL_GREY), COL_CLEAR) &&
+        ready && !remoteMode) {
         repeatMode = (repeatMode + 1) % 3;
         sendRepeat(repeatMode);
     }
@@ -1727,7 +1947,7 @@ void PlaybackScreen::drawTransport(const PlayerModel::Snapshot& snap) {
     ImGui::PopStyleVar(2);
 
     // Repeat-one has no separate glyph in the bundled icon range: mark it.
-    if (repeatMode == 2) {
+    if (repeatMode == 2 && !remoteMode) {
         ImVec2 r = ImGui::GetItemRectMax();
         ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(r.x - 8.0f, r.y - 14.0f), 4.0f, COL_GREENV);
     }
@@ -2242,13 +2462,16 @@ void PlaybackScreen::drawNav() {
 
 void PlaybackScreen::draw() {
     PlayerModel::Snapshot snap = gui->player.snapshot();
+    // Another device plays and this one does not: the pane follows it.
+    remoteMode = remoteShown(snap);
+    PlayerModel::Snapshot shown = remoteMode ? remoteSnapshot() : snap;
 
     // Global shortcuts, independent of where the gamepad focus is.
     uint32_t pressed = Input::pressed();
-    if (gui->cspot_started) {
-        if (pressed & SCE_CTRL_START) gui->playToggleCallback();
-        if (pressed & SCE_CTRL_LTRIGGER) previous(snap);
-        if (pressed & SCE_CTRL_RTRIGGER) gui->nextCallback();
+    if (gui->cspot_started || remoteMode) {
+        if (pressed & SCE_CTRL_START) togglePlay(shown);
+        if (pressed & SCE_CTRL_LTRIGGER) previous(shown);
+        if (pressed & SCE_CTRL_RTRIGGER) skipNext();
     }
     if (pressed & SCE_CTRL_SELECT) {
         tab = tab == Tab::LIBRARY ? Tab::SEARCH : (tab == Tab::SEARCH ? Tab::SETTINGS : Tab::LIBRARY);
@@ -2271,7 +2494,7 @@ void PlaybackScreen::draw() {
                                        ImGuiWindowFlags_NoScrollWithMouse;
 
     ImGui::BeginChild("nowplaying", ImVec2(leftW, 0.0f), false, kNoScroll);
-    drawNowPlaying(snap);
+    drawNowPlaying(shown);
     ImGui::EndChild();
 
     ImGui::SameLine();
@@ -2309,6 +2532,9 @@ std::string PlaybackScreen::debugState() {
         ",\"loading\":" + (snap.loading ? "true" : "false") +
         ",\"shuffle\":" + (shuffleOn ? "true" : "false") +
         ",\"repeat\":" + std::to_string(repeatMode) +
+        ",\"remote\":" + (remoteShown(snap) ? json_quote(remote.deviceName + ": " + remoteSnapshot().name +
+                                                         (remote.playing ? " (playing)" : " (paused)"))
+                                            : std::string("null")) +
         ",\"library\":{\"state\":" + json_quote(stateName(libraryState)) +
         ",\"error\":" + json_quote(libraryError) +
         ",\"count\":" + std::to_string(playlists.size()) +
@@ -2473,6 +2699,64 @@ bool PlaybackScreen::debugCommand(const std::string &cmd, const std::string &arg
     if (cmd == "refresh") {
         loadLibrary();
         return true;
+    }
+    if (cmd == "connect") {
+        // connect cmd ENDPOINT [MS]: a command to the active device.
+        // connect here: transfer to this Vita. connect fake NAME [paused]: a
+        // made-up device playing the track this Vita shows, held until
+        // "connect fake off" (UI tests).
+        std::string sub = arg.substr(0, arg.find(' '));
+        std::string rest = arg.size() > sub.size() ? arg.substr(sub.size() + 1) : "";
+        if (sub == "cmd") {
+            std::string endpoint = rest.substr(0, rest.find(' '));
+            int64_t ms = rest.size() > endpoint.size() ? atoll(rest.c_str() + endpoint.size() + 1) : -1;
+            std::string target = gui->connect.snapshot().activeId;
+            GUI *g = gui;
+            gui->net.post([g, target, endpoint, ms] {
+                bool ok = g->connect.command(target, endpoint, ms);
+                g->net.deliver([g, ok] { g->toast(ok ? "Command sent." : "Command refused."); });
+            }, true);
+            return !target.empty();
+        }
+        if (sub == "here") {
+            playHere();
+            return true;
+        }
+        if (sub == "fake" && rest == "off") {
+            gui->connect.release();
+            return true;
+        }
+        if (sub == "fake") {
+            PlayerModel::Snapshot local = gui->player.snapshot();
+            ConnectState f;
+            bool paused = rest.size() > 7 && rest.compare(rest.size() - 7, 7, " paused") == 0;
+            f.activeId = "fake_device";
+            f.deviceName = paused ? rest.substr(0, rest.size() - 7) : rest;
+            f.deviceType = "SMARTPHONE";
+            f.trackUri = "spotify:track:fake";
+            f.title = local.name;
+            f.artist = local.artist;
+            f.imageUrl = local.imageUrl;
+            f.durationMs = local.durationMs;
+            f.positionMs = local.positionMs;
+            f.playing = !paused;
+            f.volume = 40000;
+            // "connect fake spotify:track:<id>": only the URI, like a speaker's
+            // cluster, so the metadata and the cover come from this app.
+            if (startsWith(f.deviceName, "spotify:track:")) {
+                f.trackUri = f.deviceName;
+                f.deviceName = "Test speaker";
+                f.deviceType = "SPEAKER";
+                f.title.clear();
+                f.artist.clear();
+                f.imageUrl.clear();
+                f.durationMs = 0;
+                f.positionMs = 0;
+            }
+            gui->connect.inject(f);
+            return !f.deviceName.empty();
+        }
+        return false;
     }
     return false;
 }

@@ -165,6 +165,7 @@ add_executable(${PROJECT_NAME}
   src/Input.cpp
   src/Render.cpp
   src/NetWorker.cpp
+  src/ConnectWatch.cpp
   src/DevKit.cpp
   src/Compat.c
 )

@@ -48,6 +48,9 @@ void SpircController::subscribe() {
 
 void SpircController::setPause(bool isPaused, bool notifyPlayer) {
     if (loading) pausedWhileLoading = isPaused;
+    // Playing again after yieldPlayback: claim the active slot back, so Spotify
+    // stops the device that took it.
+    if (!isPaused && !state->isActive()) state->setActive(true);
     sendEvent(CSpotEventType::PLAY_PAUSE, isPaused);
     if (isPaused) {
         CSPOT_LOG(debug, "External pause command");
@@ -67,6 +70,11 @@ void SpircController::disconnect(void) {
     notify();
     // Send the event at the end at it might be a last gasp
     sendEvent(CSpotEventType::DISC);
+}
+
+void SpircController::yieldPlayback() {
+    state->setActive(false);
+    setPause(true);
 }
 
 void SpircController::playToggle() {

@@ -233,6 +233,9 @@ int start_cspot(SceSize _args, void *_argp) {
         gui->pauseCallback = []() {
             queue_cspot([] { spircController->setPause(true); });
         };
+        gui->yieldCallback = []() {
+            queue_cspot([] { spircController->yieldPlayback(); });
+        };
         gui->volumeCallback = [](int v) {
             queue_cspot([v] { spircController->setVolume(v); });
         };
@@ -285,6 +288,10 @@ int start_cspot(SceSize _args, void *_argp) {
                 CSPOT_LOG(error, "login5: no Web API token; in-app browsing disabled");
             }
         }
+
+        // Starts listening to what the account's other devices play; it waits
+        // for the token on its own.
+        gui->connect.start();
 
         while (gui->isRunning) {
             // updateQueue dispatches Mercury packets to spirc/track callbacks,

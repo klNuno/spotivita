@@ -158,6 +158,13 @@ public:
      * @brief Disconnect players and notify
      */
     void disconnect();
+
+    /**
+     * @brief Another device of the account started playing: pause here and
+     * give up the active slot. Phones announce it through connect-state only,
+     * never with a notify frame, so the app calls this.
+     */
+    void yieldPlayback();
 };
 
 #endif
